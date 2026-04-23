@@ -250,7 +250,7 @@ function buildSystemMessage() {
 function requireAdmin(req, res, next) {
   if (!ADMIN_PASSWORD) {
     return res.status(503).json({
-      error: '服务端未配置 EASYCHAT_ADMIN_PASSWORD，无法使用在线配置功能'
+      error: '服务端未配置 EASYCHAT_ADMIN_PASSWORD，服务不可用'
     });
   }
 
@@ -266,7 +266,7 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/config', (req, res) => {
+app.get('/api/config', requireAdmin, (req, res) => {
   try {
     res.json(getPublicConfig());
   } catch (error) {
@@ -294,7 +294,7 @@ app.put('/api/admin/config', requireAdmin, (req, res) => {
   }
 });
 
-app.post('/api/test', async (req, res) => {
+app.post('/api/test', requireAdmin, async (req, res) => {
   try {
     const { presetId } = req.body || {};
     const preset = findPresetById(presetId);
@@ -342,7 +342,7 @@ app.post('/api/test', async (req, res) => {
   }
 });
 
-app.post('/api/upload-image', (req, res) => {
+app.post('/api/upload-image', requireAdmin, (req, res) => {
   try {
     const { dataUrl } = req.body || {};
     if (!dataUrl) {
@@ -362,7 +362,7 @@ app.post('/api/upload-image', (req, res) => {
   }
 });
 
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', requireAdmin, async (req, res) => {
   try {
     const { presetId, messages = [], stream = true } = req.body || {};
 
@@ -429,7 +429,7 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-app.post('/api/image-generate', async (req, res) => {
+app.post('/api/image-generate', requireAdmin, async (req, res) => {
   try {
     const { presetId, prompt, size, quality, n } = req.body || {};
     const cleanPrompt = String(prompt || '').trim();

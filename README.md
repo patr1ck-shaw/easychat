@@ -59,6 +59,19 @@ docker exec -it easychat sh -c 'tail -f /data/easychat.log'
 2. 点击齿轮，输入 `Admin Password`
 3. 加载配置并填写 `Base URL / Model / API Key`
 4. 保存后测试连通性
+5. 之后聊天、出图、截图上传都需要该管理密码（仅管理员可用）
+
+### 访问控制（方案 A：仅管理员可用）
+
+- 以下接口已强制管理员鉴权（请求头必须带 `x-admin-password`）：
+  - `/api/config`
+  - `/api/test`
+  - `/api/upload-image`
+  - `/api/chat`
+  - `/api/image-generate`
+  - `/api/admin/config`
+- 若服务端未设置 `EASYCHAT_ADMIN_PASSWORD`，上述能力会返回 `503`。
+- 若密码错误，会返回 `401`。
 
 ### 出图配置说明
 

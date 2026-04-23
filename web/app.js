@@ -108,9 +108,13 @@ function dataUrlSizeKB(dataUrl) {
 }
 
 async function uploadImageDataUrl(dataUrl) {
+  const password = requireAdminPasswordOrThrow();
   const res = await fetch('/api/upload-image', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-admin-password': password
+    },
     body: JSON.stringify({ dataUrl })
   });
 
@@ -266,6 +270,14 @@ function handleUserInputPaste(event) {
 
 function getAdminPassword() {
   return document.getElementById('admin-password').value.trim();
+}
+
+function requireAdminPasswordOrThrow() {
+  const password = getAdminPassword();
+  if (!password) {
+    throw new Error('请先输入管理密码');
+  }
+  return password;
 }
 
 function getCurrentSession() {
@@ -680,7 +692,12 @@ async function saveAdminConfig() {
 }
 
 async function refreshPublicConfig() {
-  const res = await fetch('/api/config');
+  const password = requireAdminPasswordOrThrow();
+  const res = await fetch('/api/config', {
+    headers: {
+      'x-admin-password': password
+    }
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   publicConfig = await res.json();
 
@@ -710,13 +727,22 @@ async function testConnection() {
   const preset = getCurrentPreset();
   if (!preset) return;
 
+  const password = getAdminPassword();
+  if (!password) {
+    setStatus('请先输入管理密码', 'error');
+    return;
+  }
+
   setStatus('正在测试连通性...', 'info');
   indicator.className = 'w-3 h-3 rounded-full bg-yellow-400 animate-pulse';
 
   try {
     const res = await fetch('/api/test', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
       body: JSON.stringify({ presetId: preset.id })
     });
 
@@ -779,6 +805,12 @@ async function handleSend() {
 
   if ((!text && !imageUrl) || !preset) return;
 
+  const password = getAdminPassword();
+  if (!password) {
+    setStatus('请先输入管理密码', 'error');
+    return;
+  }
+
   let session = getCurrentSession();
   if (!session) {
     createNewChat();
@@ -819,7 +851,10 @@ async function handleSend() {
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
       body: JSON.stringify({
         presetId: preset.id,
         messages: session.history,
@@ -875,6 +910,12 @@ async function handleImageGenerate() {
 
   if (!prompt || !preset) return;
 
+  const password = getAdminPassword();
+  if (!password) {
+    setStatus('请先输入管理密码', 'error');
+    return;
+  }
+
   let session = getCurrentSession();
   if (!session) {
     createNewChat();
@@ -904,7 +945,10 @@ async function handleImageGenerate() {
   try {
     const response = await fetch('/api/image-generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
       body: JSON.stringify({
         presetId: preset.id,
         prompt,
@@ -951,14 +995,26 @@ async function init() {
     document.getElementById('admin-password').value = savedAdminPassword;
   }
 
-  document.getElementById('admin-password').addEventListener('change', (event) => {
+  document.getElementById('admin-password').addEventListener('change', async (event) => {
     localStorage.setItem('easychat-admin-password', event.target.value);
+    if (!event.target.value.trim()) return;
+    try {
+      await refreshPublicConfig();
+      setStatus('鉴权成功，可开始使用', 'success');
+    } catch (error) {
+      setStatus(`鉴权失败：${error.message}`, 'error');
+    }
   });
 
   document.getElementById('user-input')?.addEventListener('paste', handleUserInputPaste);
   updateImagePreview();
 
   try {
+    if (!getAdminPassword()) {
+      setStatus('请输入管理密码后开始使用', 'info');
+      return;
+    }
+
     await refreshPublicConfig();
 
     if (sessions.length === 0) {
