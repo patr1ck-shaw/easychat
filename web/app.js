@@ -9,6 +9,44 @@ let pendingImageDataUrl = '';
 const IMAGE_MAX_WIDTH = 1280;
 const IMAGE_MAX_HEIGHT = 1280;
 const IMAGE_QUALITY = 0.82;
+const IMAGE_GENERATE_PRIMARY_SIZE = '3840x2160';
+const IMAGE_GENERATE_FALLBACK_SIZES = ['2560x1440', '1920x1080', '1792x1024', '1024x1024'];
+
+function buildImageFilename(url) {
+  const now = new Date();
+  const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
+  const ext = /\.png($|\?)/i.test(url) ? 'png' : /\.webp($|\?)/i.test(url) ? 'webp' : /\.jpg($|\?)/i.test(url) || /\.jpeg($|\?)/i.test(url) ? 'jpg' : 'png';
+  return `easychat-image-${date}-${Date.now()}.${ext}`;
+}
+
+async function downloadImage(url) {
+  const safeUrl = sanitizeImageUrl(url);
+  if (!safeUrl) {
+    setStatus('图片地址无效，无法下载', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch(safeUrl);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = buildImageFilename(safeUrl);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+    setStatus('图片下载已开始', 'success');
+  } catch (error) {
+    window.open(safeUrl, '_blank', 'noopener,noreferrer');
+    setStatus(`下载失败，已为你打开原图：${error.message}`, 'info');
+  }
+}
 
 function isQuotaExceededError(error) {
   const msg = String(error?.message || error || '').toLowerCase();
@@ -204,6 +242,16 @@ function renderBubbleContent(bubble, content) {
     img.alt = 'user-image';
     img.className = 'mt-3 rounded-xl max-h-72 w-auto border border-white/20 dark:border-slate-700';
     bubble.appendChild(img);
+
+    const actions = document.createElement('div');
+    actions.className = 'mt-1';
+    const downloadBtn = document.createElement('button');
+    downloadBtn.type = 'button';
+    downloadBtn.className = 'text-[11px] text-blue-500 hover:text-blue-600 transition';
+    downloadBtn.textContent = '下载图片';
+    downloadBtn.onclick = () => downloadImage(url);
+    actions.appendChild(downloadBtn);
+    bubble.appendChild(actions);
   });
 }
 
@@ -952,7 +1000,8 @@ async function handleImageGenerate() {
       body: JSON.stringify({
         presetId: preset.id,
         prompt,
-        size: '1024x1024'
+        size: IMAGE_GENERATE_PRIMARY_SIZE,
+        fallbackSizes: IMAGE_GENERATE_FALLBACK_SIZES
       })
     });
 
@@ -962,7 +1011,10 @@ async function handleImageGenerate() {
     }
 
     const assistantContent = [
-      { type: 'text', text: `已为你生成图片。\n\n提示词：${data.prompt || prompt}${data.revisedPrompt ? `\n\n优化后提示词：${data.revisedPrompt}` : ''}` },
+      {
+        type: 'text',
+        text: `已为你生成图片。${data.sizeUsed ? `\n\n分辨率：${data.sizeUsed}` : ''}${data.fallbackApplied ? '（已自动降级到兼容尺寸）' : ''}\n\n提示词：${data.prompt || prompt}${data.revisedPrompt ? `\n\n优化后提示词：${data.revisedPrompt}` : ''}`
+      },
       { type: 'image_url', image_url: { url: sanitizeImageUrl(data.url) || data.url } }
     ];
 

@@ -67,6 +67,27 @@ function normalizeBaseUrl(baseUrl) {
   return String(baseUrl || '').trim().replace(/\/+$/, '');
 }
 
+const DEFAULT_IMAGE_FALLBACK_SIZES = ['2560x1440', '1920x1080', '1024x1024'];
+
+function normalizeImageSize(size) {
+  const value = String(size || '').trim();
+  if (!value) return '';
+  return /^\d{2,5}x\d{2,5}$/i.test(value) ? value.toLowerCase() : '';
+}
+
+function uniqueNonEmptyStrings(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const item of list) {
+    const value = String(item || '').trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
 function normalizePreset(preset, index) {
   return {
     id: String(preset.id || `preset-${Date.now()}-${index}`),
@@ -431,7 +452,7 @@ app.post('/api/chat', requireAdmin, async (req, res) => {
 
 app.post('/api/image-generate', requireAdmin, async (req, res) => {
   try {
-    const { presetId, prompt, size, quality, n } = req.body || {};
+    const { presetId, prompt, size, quality, n, fallbackSizes } = req.body || {};
     const cleanPrompt = String(prompt || '').trim();
 
     if (!cleanPrompt) {
@@ -449,54 +470,100 @@ app.post('/api/image-generate', requireAdmin, async (req, res) => {
       return res.status(400).json({ error: '当前预设缺少可用模型（model/imageModel）' });
     }
 
-    const payload = {
-      model,
-      prompt: cleanPrompt,
-      response_format: 'url'
-    };
+    const requestedSize = normalizeImageSize(size);
+    const fallbackList = uniqueNonEmptyStrings(
+      (Array.isArray(fallbackSizes) ? fallbackSizes : DEFAULT_IMAGE_FALLBACK_SIZES)
+        .map((item) => normalizeImageSize(item))
+        .filter(Boolean)
+    );
+    const sizeAttempts = uniqueNonEmptyStrings([requestedSize, ...fallbackList].filter(Boolean));
 
-    if (size) payload.size = String(size);
-    if (quality) payload.quality = String(quality);
-    if (Number.isInteger(n) && n > 0 && n <= 4) payload.n = n;
+    let lastStatus = 500;
+    let lastDetails = null;
 
-    const upstream = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${preset.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    for (let index = 0; index < Math.max(sizeAttempts.length, 1); index += 1) {
+      const trySize = sizeAttempts[index] || '';
+      const payload = {
+        model,
+        prompt: cleanPrompt,
+        response_format: 'url'
+      };
 
-    const text = await upstream.text();
-    let data = null;
-    try {
-      data = JSON.parse(text);
-    } catch (_) {}
+      if (trySize) payload.size = trySize;
+      if (quality) payload.quality = String(quality);
+      if (Number.isInteger(n) && n > 0 && n <= 4) payload.n = n;
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).json({
-        error: '上游图片接口返回错误',
-        details: data || text
+      const upstream = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${preset.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const text = await upstream.text();
+      let data = null;
+      try {
+        data = JSON.parse(text);
+      } catch (_) {}
+
+      if (!upstream.ok) {
+        lastStatus = upstream.status;
+        lastDetails = data || text;
+
+        if (index < sizeAttempts.length - 1) {
+          writeLog('INFO', '图片生成尺寸降级重试', {
+            model,
+            fromSize: trySize || 'default',
+            toSize: sizeAttempts[index + 1],
+            status: upstream.status
+          });
+          continue;
+        }
+
+        return res.status(upstream.status).json({
+          error: '上游图片接口返回错误',
+          details: data || text
+        });
+      }
+
+      const first = data?.data?.[0] || {};
+      const imageUrl = first.url || toDataUrlFromBase64(first.b64_json);
+
+      if (!imageUrl) {
+        lastStatus = 502;
+        lastDetails = data || text;
+
+        if (index < sizeAttempts.length - 1) {
+          writeLog('INFO', '图片结果为空，尝试降级尺寸重试', {
+            model,
+            fromSize: trySize || 'default',
+            toSize: sizeAttempts[index + 1]
+          });
+          continue;
+        }
+
+        return res.status(502).json({
+          error: '上游未返回有效图片数据',
+          details: data || text
+        });
+      }
+
+      return res.json({
+        ok: true,
+        model,
+        prompt: cleanPrompt,
+        url: imageUrl,
+        revisedPrompt: first.revised_prompt || '',
+        sizeUsed: trySize || '',
+        fallbackApplied: index > 0
       });
     }
 
-    const first = data?.data?.[0] || {};
-    const imageUrl = first.url || toDataUrlFromBase64(first.b64_json);
-
-    if (!imageUrl) {
-      return res.status(502).json({
-        error: '上游未返回有效图片数据',
-        details: data || text
-      });
-    }
-
-    return res.json({
-      ok: true,
-      model,
-      prompt: cleanPrompt,
-      url: imageUrl,
-      revisedPrompt: first.revised_prompt || ''
+    return res.status(lastStatus || 500).json({
+      error: '生成图片失败',
+      details: lastDetails || '未知错误'
     });
   } catch (error) {
     writeLog('ERROR', '图片生成失败', { message: error.message });
