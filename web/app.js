@@ -1,16 +1,100 @@
 let publicConfig = null;
 let adminConfig = null;
 let currentPresetId = null;
-let sessions = JSON.parse(localStorage.getItem('easychat-sessions')) || [];
-let currentSessionId = localStorage.getItem('easychat-current-id') || null;
+const STORAGE_SESSIONS_KEY = 'easychat-sessions';
+const STORAGE_CURRENT_ID_KEY = 'easychat-current-id';
+let sessions = readLocalSessions();
+let currentSessionId = localStorage.getItem(STORAGE_CURRENT_ID_KEY) || null;
 let abortController = null;
 let imageGenerating = false;
 let pendingImageDataUrl = '';
+let sessionsSyncTimer = null;
+let sessionsSyncInFlight = false;
 const IMAGE_MAX_WIDTH = 1280;
 const IMAGE_MAX_HEIGHT = 1280;
 const IMAGE_QUALITY = 0.82;
 const IMAGE_GENERATE_PRIMARY_SIZE = '3840x2160';
 const IMAGE_GENERATE_FALLBACK_SIZES = ['2560x1440', '1920x1080', '1792x1024', '1024x1024'];
+
+function readLocalSessions() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_SESSIONS_KEY));
+    return Array.isArray(raw) ? raw : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function syncSessionsToLocalStorage() {
+  localStorage.setItem(STORAGE_SESSIONS_KEY, JSON.stringify(sessions));
+  localStorage.setItem(STORAGE_CURRENT_ID_KEY, currentSessionId || '');
+}
+
+async function pushSessionsToServer() {
+  if (sessionsSyncInFlight) return;
+  const password = getAdminPassword();
+  if (!password) return;
+
+  sessionsSyncInFlight = true;
+  try {
+    await fetch('/api/sessions', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
+      body: JSON.stringify({ sessions, currentSessionId })
+    });
+  } catch (error) {
+    console.warn('同步会话到服务端失败', error);
+  } finally {
+    sessionsSyncInFlight = false;
+  }
+}
+
+function scheduleSessionsSync(immediate = false) {
+  if (sessionsSyncTimer) {
+    clearTimeout(sessionsSyncTimer);
+    sessionsSyncTimer = null;
+  }
+
+  const delay = immediate ? 50 : 900;
+  sessionsSyncTimer = setTimeout(() => {
+    sessionsSyncTimer = null;
+    pushSessionsToServer();
+  }, delay);
+}
+
+async function loadSessionsFromServer() {
+  const password = getAdminPassword();
+  if (!password) return;
+
+  try {
+    const res = await fetch('/api/sessions', {
+      headers: {
+        'x-admin-password': password
+      }
+    });
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const remoteSessions = Array.isArray(data?.sessions) ? data.sessions : [];
+    const remoteCurrentId = String(data?.currentSessionId || '').trim();
+
+    if (remoteSessions.length > 0) {
+      sessions = remoteSessions;
+      currentSessionId = remoteSessions.some((s) => s.id === remoteCurrentId) ? remoteCurrentId : remoteSessions[0].id;
+      syncSessionsToLocalStorage();
+      return;
+    }
+
+    if (sessions.length > 0) {
+      scheduleSessionsSync(true);
+    }
+  } catch (error) {
+    console.warn('从服务端加载会话失败，将继续使用本地会话', error);
+  }
+}
 
 function buildImageFilename(url) {
   const now = new Date();
@@ -124,8 +208,8 @@ function shrinkSessionsForStorage() {
 function saveSessions() {
   for (let i = 0; i < 6; i += 1) {
     try {
-      localStorage.setItem('easychat-sessions', JSON.stringify(sessions));
-      localStorage.setItem('easychat-current-id', currentSessionId || '');
+      syncSessionsToLocalStorage();
+      scheduleSessionsSync();
       return;
     } catch (error) {
       if (!isQuotaExceededError(error)) {
@@ -392,8 +476,8 @@ function toggleDarkMode() {
 
 function clearAllData() {
   if (!confirm('清空所有本地会话记录？')) return;
-  localStorage.removeItem('easychat-sessions');
-  localStorage.removeItem('easychat-current-id');
+  localStorage.removeItem(STORAGE_SESSIONS_KEY);
+  localStorage.removeItem(STORAGE_CURRENT_ID_KEY);
   location.reload();
 }
 
@@ -1094,6 +1178,7 @@ async function init() {
     }
 
     await refreshPublicConfig();
+    await loadSessionsFromServer();
 
     if (sessions.length === 0) {
       createNewChat();

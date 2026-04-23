@@ -10,8 +10,10 @@ services:
     environment:
       EASYCHAT_ADMIN_PASSWORD: change-this-password
       LOG_PATH: /app/server/logs/easychat.log
+      SESSIONS_PATH: /app/server/sessions.json
     restart: unless-stopped
     volumes:
       - ./server/presets.json:/app/server/presets.json
       - ./server/logs:/app/server/logs
       - ./server/uploads:/app/server/uploads
+      - ./server/sessions.json:/app/server/sessions.json

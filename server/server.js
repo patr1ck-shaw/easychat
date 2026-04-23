@@ -18,6 +18,7 @@ const EXAMPLE_CONFIG_PATH = path.join(__dirname, 'presets.example.json');
 const ADMIN_PASSWORD = process.env.EASYCHAT_ADMIN_PASSWORD || '';
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
 const LOG_PATH = process.env.LOG_PATH || '';
+const SESSIONS_PATH = process.env.SESSIONS_PATH || path.join(__dirname, 'sessions.json');
 
 app.use(express.json({ limit: '10mb' }));
 app.use((req, res, next) => {
@@ -37,6 +38,11 @@ if (LOG_PATH) {
   if (!fs.existsSync(logDir)) {
     fs.mkdirSync(logDir, { recursive: true });
   }
+}
+
+const sessionsDir = path.dirname(SESSIONS_PATH);
+if (!fs.existsSync(sessionsDir)) {
+  fs.mkdirSync(sessionsDir, { recursive: true });
 }
 
 function writeLog(level, message, extra = null) {
@@ -136,6 +142,61 @@ function loadConfig() {
   return validateConfig(readJson(CONFIG_PATH));
 }
 
+function normalizeSessionsStore(input) {
+  const rawSessions = Array.isArray(input?.sessions) ? input.sessions : [];
+  const sessions = rawSessions
+    .map((session, index) => {
+      const id = String(session?.id || '').trim() || `session-${Date.now()}-${index}`;
+      const title = String(session?.title || 'New Chat').trim() || 'New Chat';
+      const history = Array.isArray(session?.history)
+        ? session.history
+            .filter((msg) => msg && typeof msg === 'object')
+            .map((msg) => ({
+              role: String(msg.role || '').trim() || 'user',
+              content: msg.content ?? ''
+            }))
+        : [];
+      return { id, title, history };
+    })
+    .slice(0, 50);
+
+  const wantedCurrentId = String(input?.currentSessionId || '').trim();
+  const currentSessionId = sessions.some((s) => s.id === wantedCurrentId)
+    ? wantedCurrentId
+    : sessions[0]?.id || null;
+
+  return { sessions, currentSessionId };
+}
+
+function ensureSessionsFile() {
+  if (fs.existsSync(SESSIONS_PATH)) return;
+  const initial = normalizeSessionsStore({ sessions: [], currentSessionId: null });
+  fs.writeFileSync(SESSIONS_PATH, `${JSON.stringify(initial, null, 2)}\n`, 'utf-8');
+}
+
+function loadSessionsStore() {
+  ensureSessionsFile();
+  try {
+    const raw = readJson(SESSIONS_PATH);
+    return normalizeSessionsStore(raw);
+  } catch (_) {
+    const fallback = normalizeSessionsStore({ sessions: [], currentSessionId: null });
+    fs.writeFileSync(SESSIONS_PATH, `${JSON.stringify(fallback, null, 2)}\n`, 'utf-8');
+    return fallback;
+  }
+}
+
+function saveSessionsStore(input) {
+  const normalized = normalizeSessionsStore(input);
+  const text = `${JSON.stringify(normalized, null, 2)}\n`;
+  const maxBytes = 8 * 1024 * 1024;
+  if (Buffer.byteLength(text, 'utf-8') > maxBytes) {
+    throw new Error('会话数据过大，超过 8MB 限制');
+  }
+  fs.writeFileSync(SESSIONS_PATH, text, 'utf-8');
+  return normalized;
+}
+
 function saveConfig(config) {
   const normalized = validateConfig(config);
   fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(normalized, null, 2)}\n`, 'utf-8');
@@ -176,6 +237,62 @@ function getExtByMime(mime) {
     'image/gif': 'gif'
   };
   return map[mime] || '';
+}
+
+function getMimeByExt(ext) {
+  const map = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    gif: 'image/gif'
+  };
+  return map[String(ext || '').toLowerCase()] || '';
+}
+
+function inferExtFromUrl(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const pathname = String(u.pathname || '');
+    const ext = pathname.split('.').pop()?.toLowerCase() || '';
+    return ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext) ? ext : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function saveImageBuffer(buffer, extHint = 'png') {
+  const ext = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(String(extHint || '').toLowerCase())
+    ? String(extHint).toLowerCase()
+    : 'png';
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+  const filepath = path.join(UPLOAD_DIR, filename);
+  fs.writeFileSync(filepath, buffer);
+  return filename;
+}
+
+async function persistRemoteImage(remoteUrl) {
+  const upstream = await fetch(remoteUrl);
+  if (!upstream.ok) {
+    throw new Error(`拉取上游图片失败 HTTP ${upstream.status}`);
+  }
+
+  const arr = await upstream.arrayBuffer();
+  const buffer = Buffer.from(arr);
+  if (!buffer.length) {
+    throw new Error('上游图片为空');
+  }
+
+  const maxBytes = 20 * 1024 * 1024;
+  if (buffer.length > maxBytes) {
+    throw new Error('上游图片过大（超过 20MB）');
+  }
+
+  const contentType = String(upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  const extByMime = getExtByMime(contentType);
+  const extByUrl = inferExtFromUrl(remoteUrl);
+  const ext = extByMime || extByUrl || 'png';
+  return saveImageBuffer(buffer, ext);
 }
 
 function getPublicBaseUrl(req) {
@@ -312,6 +429,27 @@ app.put('/api/admin/config', requireAdmin, (req, res) => {
   } catch (error) {
     writeLog('ERROR', '保存管理配置失败', { message: error.message });
     res.status(400).json({ error: error.message || '保存配置失败' });
+  }
+});
+
+app.get('/api/sessions', requireAdmin, (req, res) => {
+  try {
+    const store = loadSessionsStore();
+    return res.json({ ok: true, ...store });
+  } catch (error) {
+    writeLog('ERROR', '读取会话存储失败', { message: error.message });
+    return res.status(500).json({ ok: false, error: error.message || '读取会话失败' });
+  }
+});
+
+app.put('/api/sessions', requireAdmin, (req, res) => {
+  try {
+    const { sessions, currentSessionId } = req.body || {};
+    const saved = saveSessionsStore({ sessions, currentSessionId });
+    return res.json({ ok: true, ...saved });
+  } catch (error) {
+    writeLog('ERROR', '保存会话存储失败', { message: error.message });
+    return res.status(400).json({ ok: false, error: error.message || '保存会话失败' });
   }
 });
 
@@ -529,7 +667,7 @@ app.post('/api/image-generate', requireAdmin, async (req, res) => {
       }
 
       const first = data?.data?.[0] || {};
-      const imageUrl = first.url || toDataUrlFromBase64(first.b64_json);
+      let imageUrl = first.url || toDataUrlFromBase64(first.b64_json);
 
       if (!imageUrl) {
         lastStatus = 502;
@@ -548,6 +686,31 @@ app.post('/api/image-generate', requireAdmin, async (req, res) => {
           error: '上游未返回有效图片数据',
           details: data || text
         });
+      }
+
+      if (first.url) {
+        try {
+          const savedFilename = await persistRemoteImage(first.url);
+          imageUrl = `${getPublicBaseUrl(req)}/uploads/${savedFilename}`;
+        } catch (persistError) {
+          writeLog('INFO', '图片持久化失败，回退使用上游直链', {
+            message: persistError.message
+          });
+        }
+      } else if (first.b64_json) {
+        try {
+          const mime = String(first?.mime_type || '').trim().toLowerCase() || 'image/png';
+          const ext = getExtByMime(mime) || 'png';
+          const buffer = Buffer.from(String(first.b64_json), 'base64');
+          if (buffer.length) {
+            const savedFilename = saveImageBuffer(buffer, ext);
+            imageUrl = `${getPublicBaseUrl(req)}/uploads/${savedFilename}`;
+          }
+        } catch (persistError) {
+          writeLog('INFO', 'base64 图片持久化失败，回退 data url', {
+            message: persistError.message
+          });
+        }
       }
 
       return res.json({
