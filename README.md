@@ -7,6 +7,7 @@
 - 多模型预设（在线管理）
 - 流式回复
 - 粘贴截图（Ctrl+V）直接识图
+- 一键文生图（🎨 按钮）
 - 服务端保存 API Key（前端不直连模型厂商）
 
 ## Docker 运行
@@ -51,6 +52,13 @@ docker logs -f easychat
 2. 点击齿轮，输入 `Admin Password`
 3. 加载配置并填写 `Base URL / Model / API Key`
 4. 保存后测试连通性
+
+### 出图配置说明
+
+- 在管理面板的每个 Preset 中可配置：
+  - `model`：聊天模型（走 `/chat/completions`）
+  - `imageModel`：出图模型（走 `/images/generations`，如 `gpt-image-1`）
+- 聊天输入框右侧点击 `🎨` 可触发出图；点击发送按钮仍是普通对话。
 
 ## 本地开发（可选）
 

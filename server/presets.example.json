@@ -8,6 +8,7 @@
       "name": "OpenAI",
       "baseUrl": "https://api.openai.com/v1",
       "model": "gpt-4o",
+      "imageModel": "gpt-image-1",
       "apiKey": "sk-REPLACE_ME"
     },
     {
@@ -15,6 +16,7 @@
       "name": "DeepSeek",
       "baseUrl": "https://api.deepseek.com/v1",
       "model": "deepseek-chat",
+      "imageModel": "",
       "apiKey": "sk-REPLACE_ME"
     }
   ]

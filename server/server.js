@@ -46,6 +46,7 @@ function normalizePreset(preset, index) {
     name: String(preset.name || `Preset ${index + 1}`).trim(),
     baseUrl: normalizeBaseUrl(preset.baseUrl || ''),
     model: String(preset.model || '').trim(),
+    imageModel: String(preset.imageModel || '').trim(),
     apiKey: String(preset.apiKey || '').trim()
   };
 }
@@ -102,9 +103,16 @@ function getPublicConfig() {
     presets: config.presets.map((preset) => ({
       id: preset.id,
       name: preset.name,
-      model: preset.model
+      model: preset.model,
+      imageModel: preset.imageModel || ''
     }))
   };
+}
+
+function toDataUrlFromBase64(base64, mime = 'image/png') {
+  const raw = String(base64 || '').trim();
+  if (!raw) return '';
+  return `data:${mime};base64,${raw}`;
 }
 
 function findPresetById(id) {
@@ -385,6 +393,82 @@ app.post('/api/chat', async (req, res) => {
     } else {
       res.end();
     }
+  }
+});
+
+app.post('/api/image-generate', async (req, res) => {
+  try {
+    const { presetId, prompt, size, quality, n } = req.body || {};
+    const cleanPrompt = String(prompt || '').trim();
+
+    if (!cleanPrompt) {
+      return res.status(400).json({ error: 'prompt 不能为空' });
+    }
+
+    const preset = findPresetById(presetId);
+    if (!preset) {
+      return res.status(400).json({ error: '无效的 presetId' });
+    }
+
+    const url = `${normalizeBaseUrl(preset.baseUrl)}/images/generations`;
+    const model = String(preset.imageModel || preset.model || '').trim();
+    if (!model) {
+      return res.status(400).json({ error: '当前预设缺少可用模型（model/imageModel）' });
+    }
+
+    const payload = {
+      model,
+      prompt: cleanPrompt,
+      response_format: 'url'
+    };
+
+    if (size) payload.size = String(size);
+    if (quality) payload.quality = String(quality);
+    if (Number.isInteger(n) && n > 0 && n <= 4) payload.n = n;
+
+    const upstream = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${preset.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const text = await upstream.text();
+    let data = null;
+    try {
+      data = JSON.parse(text);
+    } catch (_) {}
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({
+        error: '上游图片接口返回错误',
+        details: data || text
+      });
+    }
+
+    const first = data?.data?.[0] || {};
+    const imageUrl = first.url || toDataUrlFromBase64(first.b64_json);
+
+    if (!imageUrl) {
+      return res.status(502).json({
+        error: '上游未返回有效图片数据',
+        details: data || text
+      });
+    }
+
+    return res.json({
+      ok: true,
+      model,
+      prompt: cleanPrompt,
+      url: imageUrl,
+      revisedPrompt: first.revised_prompt || ''
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message || '生成图片失败'
+    });
   }
 });
 

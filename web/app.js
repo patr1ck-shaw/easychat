@@ -4,6 +4,7 @@ let currentPresetId = null;
 let sessions = JSON.parse(localStorage.getItem('easychat-sessions')) || [];
 let currentSessionId = localStorage.getItem('easychat-current-id') || null;
 let abortController = null;
+let imageGenerating = false;
 let pendingImageDataUrl = '';
 const IMAGE_MAX_WIDTH = 1280;
 const IMAGE_MAX_HEIGHT = 1280;
@@ -269,7 +270,12 @@ function renderPresetTabs() {
 
 function updatePresetInfo() {
   const preset = getCurrentPreset();
-  document.getElementById('current-model').textContent = preset ? `${preset.name} / ${preset.model}` : '-';
+  if (!preset) {
+    document.getElementById('current-model').textContent = '-';
+    return;
+  }
+  const imageModel = preset.imageModel ? ` ｜ 出图：${preset.imageModel}` : '';
+  document.getElementById('current-model').textContent = `${preset.name} / 聊天：${preset.model}${imageModel}`;
 }
 
 function createNewChat() {
@@ -445,6 +451,7 @@ function renderAdminPanel() {
       <input data-field="name" data-id="${preset.id}" value="${escapeHtml(preset.name)}" placeholder="Preset Name" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
       <input data-field="baseUrl" data-id="${preset.id}" value="${escapeHtml(preset.baseUrl)}" placeholder="https://api.openai.com/v1" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
       <input data-field="model" data-id="${preset.id}" value="${escapeHtml(preset.model)}" placeholder="gpt-4o" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+      <input data-field="imageModel" data-id="${preset.id}" value="${escapeHtml(preset.imageModel || '')}" placeholder="gpt-image-1（可选）" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
       <input data-field="apiKey" data-id="${preset.id}" value="${escapeHtml(preset.apiKey)}" placeholder="sk-..." class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
       <div class="text-[10px] text-slate-400">Preset ${index + 1}</div>
     `;
@@ -490,6 +497,7 @@ function addAdminPreset() {
     name: 'New Preset',
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-4o',
+    imageModel: 'gpt-image-1',
     apiKey: ''
   });
 
@@ -521,9 +529,17 @@ function collectAdminForm() {
       name: String(preset.name || '').trim(),
       baseUrl: String(preset.baseUrl || '').trim(),
       model: String(preset.model || '').trim(),
+      imageModel: String(preset.imageModel || '').trim(),
       apiKey: String(preset.apiKey || '').trim()
     }))
   };
+}
+
+function setActionButtonsDisabled(disabled) {
+  const sendBtn = document.getElementById('send-btn');
+  const imageBtn = document.getElementById('image-btn');
+  if (sendBtn) sendBtn.disabled = disabled;
+  if (imageBtn) imageBtn.disabled = disabled;
 }
 
 async function loadAdminConfig() {
@@ -683,7 +699,7 @@ async function readSSEStream(response, onDelta) {
 }
 
 async function handleSend() {
-  if (abortController) return;
+  if (abortController || imageGenerating) return;
 
   const input = document.getElementById('user-input');
   const text = input.value.trim();
@@ -779,6 +795,77 @@ async function handleSend() {
   }
 }
 
+async function handleImageGenerate() {
+  if (abortController || imageGenerating) return;
+
+  const input = document.getElementById('user-input');
+  const prompt = input.value.trim();
+  const preset = getCurrentPreset();
+
+  if (!prompt || !preset) return;
+
+  let session = getCurrentSession();
+  if (!session) {
+    createNewChat();
+    session = getCurrentSession();
+  }
+
+  imageGenerating = true;
+  setActionButtonsDisabled(true);
+  document.getElementById('loading-tag').classList.remove('hidden');
+  document.getElementById('loading-tag').textContent = 'Generating image';
+  setStatus(`开始生成图片：${preset.name} / ${preset.imageModel || preset.model}`, 'info');
+
+  input.value = '';
+  input.style.height = 'auto';
+
+  const userContent = `请帮我生成一张图片：${prompt}`;
+  if (session.history.length === 0) {
+    session.title = prompt.substring(0, 24) || 'Image Chat';
+    renderHistoryList();
+  }
+
+  renderBubble('user', userContent);
+  session.history.push({ role: 'user', content: userContent });
+
+  const aiBubble = renderBubble('assistant', '正在生成图片，请稍候...');
+
+  try {
+    const response = await fetch('/api/image-generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        presetId: preset.id,
+        prompt,
+        size: '1024x1024'
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok || !data?.ok || !data?.url) {
+      throw new Error(data?.details?.error?.message || data?.error || `HTTP ${response.status}`);
+    }
+
+    const assistantContent = [
+      { type: 'text', text: `已为你生成图片。\n\n提示词：${data.prompt || prompt}${data.revisedPrompt ? `\n\n优化后提示词：${data.revisedPrompt}` : ''}` },
+      { type: 'image_url', image_url: { url: sanitizeImageUrl(data.url) || data.url } }
+    ];
+
+    renderBubbleContent(aiBubble, assistantContent);
+    session.history.push({ role: 'assistant', content: assistantContent });
+    saveSessions();
+    setStatus('图片生成成功', 'success');
+  } catch (error) {
+    aiBubble.innerHTML = `<span class="text-red-500">出图失败：${error.message}</span>`;
+    setStatus(`出图失败：${error.message}`, 'error');
+  } finally {
+    imageGenerating = false;
+    setActionButtonsDisabled(false);
+    document.getElementById('loading-tag').classList.add('hidden');
+    document.getElementById('loading-tag').textContent = 'Assistant is typing';
+  }
+}
+
 function stopGeneration() {
   if (abortController) abortController.abort();
 }
@@ -833,6 +920,7 @@ window.clearImageUrl = clearImageUrl;
 window.onload = init;
 
 document.getElementById('send-btn').onclick = handleSend;
+document.getElementById('image-btn').onclick = handleImageGenerate;
 document.getElementById('stop-btn').onclick = stopGeneration;
 document.getElementById('user-input').oninput = function () {
   this.style.height = 'auto';
