@@ -9,6 +9,9 @@ services:
       - "7777:7777"
     environment:
       EASYCHAT_ADMIN_PASSWORD: change-this-password
+      LOG_PATH: /app/server/logs/easychat.log
     restart: unless-stopped
     volumes:
       - ./server/presets.json:/app/server/presets.json
+      - ./server/logs:/app/server/logs
+      - ./server/uploads:/app/server/uploads

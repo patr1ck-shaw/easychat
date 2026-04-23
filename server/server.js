@@ -17,11 +17,38 @@ const CONFIG_PATH = process.env.CONFIG_PATH || path.join(__dirname, 'presets.jso
 const EXAMPLE_CONFIG_PATH = path.join(__dirname, 'presets.example.json');
 const ADMIN_PASSWORD = process.env.EASYCHAT_ADMIN_PASSWORD || '';
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
+const LOG_PATH = process.env.LOG_PATH || '';
 
 app.use(express.json({ limit: '10mb' }));
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    writeLog('HTTP', `${req.method} ${req.originalUrl} -> ${res.statusCode} (${Date.now() - start}ms)`);
+  });
+  next();
+});
 
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+if (LOG_PATH) {
+  const logDir = path.dirname(LOG_PATH);
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+}
+
+function writeLog(level, message, extra = null) {
+  const line = `[${new Date().toISOString()}] [${level}] ${message}${extra ? ` ${JSON.stringify(extra)}` : ''}`;
+  console.log(line);
+  if (LOG_PATH) {
+    try {
+      fs.appendFileSync(LOG_PATH, `${line}\n`, 'utf-8');
+    } catch (error) {
+      console.error(`[LOG_WRITE_ERROR] ${error.message}`);
+    }
+  }
 }
 
 function ensureConfigFile() {
@@ -243,6 +270,7 @@ app.get('/api/config', (req, res) => {
   try {
     res.json(getPublicConfig());
   } catch (error) {
+    writeLog('ERROR', '读取公开配置失败', { message: error.message });
     res.status(500).json({ error: error.message || '读取配置失败' });
   }
 });
@@ -251,6 +279,7 @@ app.get('/api/admin/config', requireAdmin, (req, res) => {
   try {
     res.json(loadConfig());
   } catch (error) {
+    writeLog('ERROR', '读取管理配置失败', { message: error.message });
     res.status(500).json({ error: error.message || '读取配置失败' });
   }
 });
@@ -260,6 +289,7 @@ app.put('/api/admin/config', requireAdmin, (req, res) => {
     const saved = saveConfig(req.body || {});
     res.json({ ok: true, config: saved });
   } catch (error) {
+    writeLog('ERROR', '保存管理配置失败', { message: error.message });
     res.status(400).json({ error: error.message || '保存配置失败' });
   }
 });
@@ -304,6 +334,7 @@ app.post('/api/test', async (req, res) => {
       status: upstream.status
     });
   } catch (error) {
+    writeLog('ERROR', '测试预设连通性失败', { message: error.message });
     return res.status(500).json({
       ok: false,
       error: error.message || '测试失败'
@@ -323,6 +354,7 @@ app.post('/api/upload-image', (req, res) => {
     const absoluteUrl = `${getPublicBaseUrl(req)}${relativeUrl}`;
     return res.json({ ok: true, url: absoluteUrl, relativeUrl });
   } catch (error) {
+    writeLog('ERROR', '上传图片失败', { message: error.message });
     return res.status(400).json({
       ok: false,
       error: error.message || '上传图片失败'
@@ -386,6 +418,7 @@ app.post('/api/chat', async (req, res) => {
 
     res.end();
   } catch (error) {
+    writeLog('ERROR', '聊天请求失败', { message: error.message });
     if (!res.headersSent) {
       res.status(500).json({
         error: error.message || '服务异常'
@@ -466,6 +499,7 @@ app.post('/api/image-generate', async (req, res) => {
       revisedPrompt: first.revised_prompt || ''
     });
   } catch (error) {
+    writeLog('ERROR', '图片生成失败', { message: error.message });
     return res.status(500).json({
       error: error.message || '生成图片失败'
     });
@@ -480,6 +514,9 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, HOST, () => {
-  console.log(`EasyChat server running on http://${HOST}:${PORT}`);
+  writeLog('INFO', `EasyChat server running on http://${HOST}:${PORT}`);
+  if (LOG_PATH) {
+    writeLog('INFO', `Log persistence enabled: ${LOG_PATH}`);
+  }
 });
 

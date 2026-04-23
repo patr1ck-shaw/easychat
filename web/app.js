@@ -10,9 +10,80 @@ const IMAGE_MAX_WIDTH = 1280;
 const IMAGE_MAX_HEIGHT = 1280;
 const IMAGE_QUALITY = 0.82;
 
+function isQuotaExceededError(error) {
+  const msg = String(error?.message || error || '').toLowerCase();
+  return msg.includes('quota') || msg.includes('exceeded') || error?.name === 'QuotaExceededError';
+}
+
+function trimMessageForStorage(message, maxTextLen = 6000) {
+  if (!message || typeof message !== 'object') return message;
+
+  const cloned = { ...message };
+  if (Array.isArray(cloned.content)) {
+    cloned.content = cloned.content.map((part) => {
+      if (!part || typeof part !== 'object') return part;
+      if (part.type === 'text' && typeof part.text === 'string' && part.text.length > maxTextLen) {
+        return { ...part, text: `${part.text.slice(0, maxTextLen)}\n\n[内容过长，已截断以节省本地存储]` };
+      }
+      return part;
+    });
+  } else if (typeof cloned.content === 'string' && cloned.content.length > maxTextLen) {
+    cloned.content = `${cloned.content.slice(0, maxTextLen)}\n\n[内容过长，已截断以节省本地存储]`;
+  }
+
+  return cloned;
+}
+
+function shrinkSessionsForStorage() {
+  if (sessions.length > 10) {
+    sessions = sessions.slice(0, 10);
+    if (!sessions.some((s) => s.id === currentSessionId)) {
+      currentSessionId = sessions[0]?.id || null;
+    }
+    return true;
+  }
+
+  const current = getCurrentSession();
+  if (current?.history?.length > 24) {
+    current.history = current.history.slice(-24);
+    return true;
+  }
+
+  let changed = false;
+  sessions = sessions.map((session) => {
+    const oldHistory = Array.isArray(session.history) ? session.history : [];
+    const newHistory = oldHistory.map((msg) => {
+      const trimmed = trimMessageForStorage(msg);
+      if (JSON.stringify(trimmed) !== JSON.stringify(msg)) changed = true;
+      return trimmed;
+    });
+    return { ...session, history: newHistory };
+  });
+
+  return changed;
+}
+
 function saveSessions() {
-  localStorage.setItem('easychat-sessions', JSON.stringify(sessions));
-  localStorage.setItem('easychat-current-id', currentSessionId || '');
+  for (let i = 0; i < 6; i += 1) {
+    try {
+      localStorage.setItem('easychat-sessions', JSON.stringify(sessions));
+      localStorage.setItem('easychat-current-id', currentSessionId || '');
+      return;
+    } catch (error) {
+      if (!isQuotaExceededError(error)) {
+        console.error('保存会话失败', error);
+        return;
+      }
+
+      const shrunk = shrinkSessionsForStorage();
+      if (!shrunk) {
+        console.error('本地存储空间不足，且无法继续压缩会话数据');
+        return;
+      }
+    }
+  }
+
+  console.error('本地存储空间不足，保存会话未完全成功');
 }
 
 function sanitizeHtml(html) {
@@ -392,7 +463,7 @@ function renderBubble(role, content) {
     role === 'user'
       ? 'bg-blue-600 text-white shadow-lg rounded-tr-none'
       : 'bg-white/70 dark:bg-darkCard/70 backdrop-blur-md text-slate-800 dark:text-slate-200 border border-white/10 dark:border-slate-800 shadow-sm rounded-tl-none'
-  } prose dark:prose-invert prose-sm leading-relaxed`;
+  } prose dark:prose-invert prose-sm leading-relaxed chat-select`;
 
   renderBubbleContent(bubble, content);
 
