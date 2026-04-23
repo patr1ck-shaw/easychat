@@ -48,6 +48,26 @@ async function downloadImage(url) {
   }
 }
 
+async function getImageDimensions(url) {
+  const safeUrl = sanitizeImageUrl(url);
+  if (!safeUrl) return null;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const width = Number(img.naturalWidth || 0);
+      const height = Number(img.naturalHeight || 0);
+      if (width > 0 && height > 0) {
+        resolve({ width, height });
+      } else {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = safeUrl;
+  });
+}
+
 function isQuotaExceededError(error) {
   const msg = String(error?.message || error || '').toLowerCase();
   return msg.includes('quota') || msg.includes('exceeded') || error?.name === 'QuotaExceededError';
@@ -1010,12 +1030,18 @@ async function handleImageGenerate() {
       throw new Error(data?.details?.error?.message || data?.error || `HTTP ${response.status}`);
     }
 
+    const safeImageUrl = sanitizeImageUrl(data.url) || data.url;
+    const actualDimensions = await getImageDimensions(safeImageUrl);
+    const requestedSizeText = data.sizeUsed || IMAGE_GENERATE_PRIMARY_SIZE;
+    const actualSizeText = actualDimensions ? `${actualDimensions.width}x${actualDimensions.height}` : '未知';
+    const sizeMismatch = actualDimensions && requestedSizeText && requestedSizeText !== actualSizeText;
+
     const assistantContent = [
       {
         type: 'text',
-        text: `已为你生成图片。${data.sizeUsed ? `\n\n分辨率：${data.sizeUsed}` : ''}${data.fallbackApplied ? '（已自动降级到兼容尺寸）' : ''}\n\n提示词：${data.prompt || prompt}${data.revisedPrompt ? `\n\n优化后提示词：${data.revisedPrompt}` : ''}`
+        text: `已为你生成图片。\n\n请求分辨率：${requestedSizeText}${data.fallbackApplied ? '（已自动降级到兼容尺寸）' : ''}\n实际分辨率：${actualSizeText}${sizeMismatch ? '\n⚠️ 上游返回的实际分辨率与请求分辨率不一致。' : ''}\n\n提示词：${data.prompt || prompt}${data.revisedPrompt ? `\n\n优化后提示词：${data.revisedPrompt}` : ''}`
       },
-      { type: 'image_url', image_url: { url: sanitizeImageUrl(data.url) || data.url } }
+      { type: 'image_url', image_url: { url: safeImageUrl } }
     ];
 
     renderBubbleContent(aiBubble, assistantContent);
