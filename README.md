@@ -20,6 +20,8 @@ docker run -d \
   -p 7777:7777 \
   -e EASYCHAT_ADMIN_PASSWORD=change-this-password \
   -e CONFIG_PATH=/data/presets.json \
+  -e LOG_PATH=/data/easychat.log \
+  -e UPLOAD_DIR=/data/uploads \
   -e PUBLIC_BASE_URL=https://你的域名 \
   -v easychat-data:/data \
   --restart unless-stopped \
@@ -29,6 +31,8 @@ docker run -d \
 说明：
 
 - `CONFIG_PATH=/data/presets.json`：配置持久化到 volume
+- `LOG_PATH=/data/easychat.log`：服务端日志持久化到 volume
+- `UPLOAD_DIR=/data/uploads`：用户上传图片持久化到 volume
 - `PUBLIC_BASE_URL`：用于图片识图场景生成可访问的绝对地址（建议配置）
 
 ### 2) 更新
@@ -44,6 +48,9 @@ docker rm easychat
 
 ```bash
 docker logs -f easychat
+
+# 若需要看持久化日志文件（容器内）
+docker exec -it easychat sh -c 'tail -f /data/easychat.log'
 ```
 
 ## 首次使用
@@ -73,4 +80,4 @@ node server.js
 
 - `server/presets.json` 不要提交到仓库
 - 对话历史默认保存在浏览器本地（localStorage）
-- 容器重建不会影响 `/data/presets.json`
+- 容器重建不会影响 `/data/presets.json`、`/data/easychat.log`、`/data/uploads`
