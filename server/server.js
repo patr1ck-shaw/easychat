@@ -78,6 +78,7 @@ function normalizeBaseUrl(baseUrl) {
 }
 
 const DEFAULT_IMAGE_FALLBACK_SIZES = ['2560x1440', '1920x1080', '1024x1024'];
+const IMAGE_SAME_SIZE_RETRIES = Math.max(1, Number(process.env.IMAGE_SAME_SIZE_RETRIES || 2));
 
 function stringifyErrorDetails(details) {
   if (typeof details === 'string') return details;
@@ -98,6 +99,25 @@ function isUnsupportedImagePayloadError(status, details) {
     text.includes('invalid_request_error') ||
     text.includes('not supported') ||
     text.includes('unsupported value')
+  );
+}
+
+function isTransientImageFailure(status, details) {
+  const code = Number(status);
+  const text = stringifyErrorDetails(details).toLowerCase();
+  if ([408, 409, 425, 429, 500, 502, 503, 504].includes(code)) return true;
+
+  return (
+    text.includes('stream disconnected') ||
+    text.includes('internal_server_error') ||
+    text.includes('timeout') ||
+    text.includes('temporarily unavailable') ||
+    text.includes('service unavailable') ||
+    text.includes('gateway timeout') ||
+    text.includes('connection reset') ||
+    text.includes('econnreset') ||
+    text.includes('rate limit') ||
+    text.includes('overloaded')
   );
 }
 
@@ -738,147 +758,172 @@ async function generateImageResult(input, publicBaseUrl) {
       fallbackSizes: fallbackList
     });
 
+    sizeAttemptLoop:
     for (let index = 0; index < Math.max(sizeAttempts.length, 1); index += 1) {
       const trySize = sizeAttempts[index] || '';
 
-      let upstream = null;
-      let text = '';
-      let data = null;
-      const payloadVariants = [true, false];
+      for (let sizeAttempt = 1; sizeAttempt <= IMAGE_SAME_SIZE_RETRIES; sizeAttempt += 1) {
 
-      for (const includeResponseFormat of payloadVariants) {
-        const payload = {
-          model,
-          prompt: cleanPrompt
-        };
+        let upstream = null;
+        let text = '';
+        let data = null;
+        const payloadVariants = [true, false];
 
-        // 不同 OpenAI 兼容网关对 response_format 支持不一致：
-        // 官方 DALL·E 需要/支持 url，部分中转或 Gemini 兼容层会直接报 unsupported parameter。
-        if (includeResponseFormat) payload.response_format = 'url';
-        if (trySize) payload.size = trySize;
-        if (quality) payload.quality = String(quality);
-        if (Number.isInteger(n) && n > 0 && n <= 4) payload.n = n;
-
-        upstream = await fetch(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${preset.apiKey}`,
-            'x-api-key': preset.apiKey,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(payload)
-        });
-
-        text = await upstream.text();
-        data = null;
-        try {
-          data = JSON.parse(text);
-        } catch (_) {}
-
-        if (upstream.ok || !includeResponseFormat || !isUnsupportedImagePayloadError(upstream.status, data || text)) {
-          break;
-        }
-
-        writeLog('INFO', '图片生成移除 response_format 后重试', {
-          model,
-          size: trySize || 'default',
-          status: upstream.status
-        });
-      }
-
-      if (!upstream.ok) {
-        lastStatus = upstream.status;
-        lastDetails = data || text;
-
-        writeLog('INFO', '图片生成上游返回错误', {
-          model,
-          size: trySize || 'default',
-          status: upstream.status,
-          details: stringifyErrorDetails(lastDetails).slice(0, 1000)
-        });
-
-        if (index < sizeAttempts.length - 1) {
-          writeLog('INFO', '图片生成尺寸降级重试', {
+        for (const includeResponseFormat of payloadVariants) {
+          const payload = {
             model,
-            fromSize: trySize || 'default',
-            toSize: sizeAttempts[index + 1],
+            prompt: cleanPrompt
+          };
+
+          // 不同 OpenAI 兼容网关对 response_format 支持不一致：
+          // 官方 DALL·E 需要/支持 url，部分中转或 Gemini 兼容层会直接报 unsupported parameter。
+          if (includeResponseFormat) payload.response_format = 'url';
+          if (trySize) payload.size = trySize;
+          if (quality) payload.quality = String(quality);
+          if (Number.isInteger(n) && n > 0 && n <= 4) payload.n = n;
+
+          upstream = await fetch(url, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${preset.apiKey}`,
+              'x-api-key': preset.apiKey,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+
+          text = await upstream.text();
+          data = null;
+          try {
+            data = JSON.parse(text);
+          } catch (_) {}
+
+          if (upstream.ok || !includeResponseFormat || !isUnsupportedImagePayloadError(upstream.status, data || text)) {
+            break;
+          }
+
+          writeLog('INFO', '图片生成移除 response_format 后重试', {
+            model,
+            size: trySize || 'default',
             status: upstream.status
           });
-          continue;
         }
 
-        const error = new Error('上游图片接口返回错误');
-        error.status = upstream.status;
-        error.details = data || text;
-        throw error;
-      }
+        if (!upstream.ok) {
+          lastStatus = upstream.status;
+          lastDetails = data || text;
 
-      const first = findFirstImageResult(data);
-      const upstreamModel = String(data?.model || first?.model || '').trim();
-      const firstUrl = String(first.url || '').trim();
-      const firstB64 = String(first.b64_json || '').trim();
-      const firstMime = String(first.mime_type || first.mime || '').trim().toLowerCase() || 'image/png';
-      let imageUrl = firstUrl || toDataUrlFromBase64(firstB64, firstMime);
-
-      if (!imageUrl) {
-        lastStatus = 502;
-        lastDetails = data || text;
-
-        writeLog('INFO', '图片结果为空', {
-          model,
-          size: trySize || 'default',
-          responsePreview: stringifyErrorDetails(lastDetails).slice(0, 1500)
-        });
-
-        if (index < sizeAttempts.length - 1) {
-          writeLog('INFO', '图片结果为空，尝试降级尺寸重试', {
+          writeLog('INFO', '图片生成上游返回错误', {
             model,
-            fromSize: trySize || 'default',
-            toSize: sizeAttempts[index + 1]
+            size: trySize || 'default',
+            attempt: `${sizeAttempt}/${IMAGE_SAME_SIZE_RETRIES}`,
+            status: upstream.status,
+            details: stringifyErrorDetails(lastDetails).slice(0, 1000)
           });
-          continue;
-        }
 
-        const error = new Error('上游未返回有效图片数据');
-        error.status = 502;
-        error.details = data || text;
-        throw error;
-      }
-
-      if (firstUrl && /^https?:\/\//i.test(firstUrl)) {
-        try {
-          const savedFilename = await persistRemoteImage(firstUrl);
-          imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
-        } catch (persistError) {
-          writeLog('INFO', '图片持久化失败，回退使用上游直链', {
-            message: persistError.message
-          });
-        }
-      } else if (firstB64) {
-        try {
-          const ext = getExtByMime(firstMime) || 'png';
-          const buffer = Buffer.from(firstB64, 'base64');
-          if (buffer.length) {
-            const savedFilename = saveImageBuffer(buffer, ext);
-            imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
+          if (sizeAttempt < IMAGE_SAME_SIZE_RETRIES && isTransientImageFailure(upstream.status, lastDetails)) {
+            writeLog('INFO', '图片生成同尺寸重试', {
+              model,
+              size: trySize || 'default',
+              nextAttempt: `${sizeAttempt + 1}/${IMAGE_SAME_SIZE_RETRIES}`,
+              status: upstream.status
+            });
+            continue;
           }
-        } catch (persistError) {
-          writeLog('INFO', 'base64 图片持久化失败，回退 data url', {
-            message: persistError.message
-          });
-        }
-      }
 
-      return {
-        ok: true,
-        model,
-        upstreamModel,
-        prompt: cleanPrompt,
-        url: imageUrl,
-        revisedPrompt: first.revised_prompt || '',
-        sizeUsed: trySize || '',
-        fallbackApplied: index > 0
-      };
+          if (index < sizeAttempts.length - 1) {
+            writeLog('INFO', '图片生成尺寸降级重试', {
+              model,
+              fromSize: trySize || 'default',
+              toSize: sizeAttempts[index + 1],
+              status: upstream.status
+            });
+            continue sizeAttemptLoop;
+          }
+
+          const error = new Error('上游图片接口返回错误');
+          error.status = upstream.status;
+          error.details = data || text;
+          throw error;
+        }
+
+        const first = findFirstImageResult(data);
+        const upstreamModel = String(data?.model || first?.model || '').trim();
+        const firstUrl = String(first.url || '').trim();
+        const firstB64 = String(first.b64_json || '').trim();
+        const firstMime = String(first.mime_type || first.mime || '').trim().toLowerCase() || 'image/png';
+        let imageUrl = firstUrl || toDataUrlFromBase64(firstB64, firstMime);
+
+        if (!imageUrl) {
+          lastStatus = 502;
+          lastDetails = data || text;
+
+          writeLog('INFO', '图片结果为空', {
+            model,
+            size: trySize || 'default',
+            attempt: `${sizeAttempt}/${IMAGE_SAME_SIZE_RETRIES}`,
+            responsePreview: stringifyErrorDetails(lastDetails).slice(0, 1500)
+          });
+
+          if (sizeAttempt < IMAGE_SAME_SIZE_RETRIES && isTransientImageFailure(lastStatus, lastDetails)) {
+            writeLog('INFO', '图片结果为空，先同尺寸重试', {
+              model,
+              size: trySize || 'default',
+              nextAttempt: `${sizeAttempt + 1}/${IMAGE_SAME_SIZE_RETRIES}`
+            });
+            continue;
+          }
+
+          if (index < sizeAttempts.length - 1) {
+            writeLog('INFO', '图片结果为空，尝试降级尺寸重试', {
+              model,
+              fromSize: trySize || 'default',
+              toSize: sizeAttempts[index + 1]
+            });
+            continue sizeAttemptLoop;
+          }
+
+          const error = new Error('上游未返回有效图片数据');
+          error.status = 502;
+          error.details = data || text;
+          throw error;
+        }
+
+        if (firstUrl && /^https?:\/\//i.test(firstUrl)) {
+          try {
+            const savedFilename = await persistRemoteImage(firstUrl);
+            imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
+          } catch (persistError) {
+            writeLog('INFO', '图片持久化失败，回退使用上游直链', {
+              message: persistError.message
+            });
+          }
+        } else if (firstB64) {
+          try {
+            const ext = getExtByMime(firstMime) || 'png';
+            const buffer = Buffer.from(firstB64, 'base64');
+            if (buffer.length) {
+              const savedFilename = saveImageBuffer(buffer, ext);
+              imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
+            }
+          } catch (persistError) {
+            writeLog('INFO', 'base64 图片持久化失败，回退 data url', {
+              message: persistError.message
+            });
+          }
+        }
+
+        return {
+          ok: true,
+          model,
+          upstreamModel,
+          prompt: cleanPrompt,
+          url: imageUrl,
+          revisedPrompt: first.revised_prompt || '',
+          sizeUsed: trySize || '',
+          fallbackApplied: index > 0
+        };
+      }
     }
 
     const error = new Error('生成图片失败');
