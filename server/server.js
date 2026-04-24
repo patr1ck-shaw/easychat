@@ -79,6 +79,18 @@ function normalizeBaseUrl(baseUrl) {
   return String(baseUrl || '').trim().replace(/\/+$/, '');
 }
 
+function buildUpstreamHeaders(apiKey, extra = {}) {
+  const cleanKey = String(apiKey || '').trim();
+  return {
+    Authorization: `Bearer ${cleanKey}`,
+    // 兼容不同网关：OpenAI 常用 Bearer，部分中转识别 x-api-key，Google/Gemini 兼容层识别 x-goog-api-key。
+    'x-api-key': cleanKey,
+    'x-goog-api-key': cleanKey,
+    'Content-Type': 'application/json',
+    ...extra
+  };
+}
+
 const DEFAULT_IMAGE_FALLBACK_SIZES = ['2560x1440', '1920x1080', '1024x1024'];
 const IMAGE_SAME_SIZE_RETRIES = Math.max(1, Number(process.env.IMAGE_SAME_SIZE_RETRIES || 2));
 
@@ -640,10 +652,7 @@ app.post('/api/test', requireAdmin, async (req, res) => {
 
     const upstream = await fetch(url, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${preset.apiKey}`,
-        'Content-Type': 'application/json'
-      },
+      headers: buildUpstreamHeaders(preset.apiKey),
       body: JSON.stringify({
         model: preset.model,
         messages: [{ role: 'user', content: 'hi' }],
@@ -713,10 +722,7 @@ app.post('/api/chat', requireAdmin, async (req, res) => {
 
     const upstream = await fetch(url, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${preset.apiKey}`,
-        'Content-Type': 'application/json'
-      },
+      headers: buildUpstreamHeaders(preset.apiKey),
       body: JSON.stringify({
         model: preset.model,
         messages: [buildSystemMessage(), ...upstreamMessages],
@@ -834,11 +840,7 @@ async function generateImageResult(input, publicBaseUrl, signal) {
 
           upstream = await fetch(url, {
             method: 'POST',
-            headers: {
-              Authorization: `Bearer ${preset.apiKey}`,
-              'x-api-key': preset.apiKey,
-              'Content-Type': 'application/json'
-            },
+            headers: buildUpstreamHeaders(preset.apiKey),
             signal,
             body: JSON.stringify(payload)
           });
