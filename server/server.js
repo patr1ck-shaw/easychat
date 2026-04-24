@@ -527,7 +527,7 @@ function normalizeUpstreamMessages(messages, req) {
   });
 }
 
-function saveBase64Image(dataUrl) {
+function saveDataUrlImage(dataUrl, maxBytes = 8 * 1024 * 1024) {
   const match = String(dataUrl || '').match(/^data:(image\/(png|jpeg|webp|gif));base64,(.+)$/i);
   if (!match) {
     throw new Error('图片格式无效，仅支持 png/jpeg/webp/gif');
@@ -542,15 +542,18 @@ function saveBase64Image(dataUrl) {
     throw new Error('图片内容为空');
   }
 
-  const maxBytes = 8 * 1024 * 1024;
   if (buffer.length > maxBytes) {
-    throw new Error('图片过大，压缩后仍超过 8MB');
+    throw new Error(`图片过大，超过 ${Math.round(maxBytes / 1024 / 1024)}MB`);
   }
 
   const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
   const filepath = path.join(UPLOAD_DIR, filename);
   fs.writeFileSync(filepath, buffer);
   return filename;
+}
+
+function saveBase64Image(dataUrl) {
+  return saveDataUrlImage(dataUrl, 8 * 1024 * 1024);
 }
 
 function buildSystemMessage() {
@@ -948,6 +951,16 @@ async function generateImageResult(input, publicBaseUrl, signal) {
             imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
           } catch (persistError) {
             writeLog('INFO', '图片持久化失败，回退使用上游直链', {
+              message: persistError.message
+            });
+          }
+        } else if (firstUrl && /^data:image\//i.test(firstUrl)) {
+          try {
+            const maxBytes = Number(process.env.IMAGE_MAX_BYTES || 32 * 1024 * 1024);
+            const savedFilename = saveDataUrlImage(firstUrl, maxBytes);
+            imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
+          } catch (persistError) {
+            writeLog('INFO', 'data url 图片持久化失败，回退 data url', {
               message: persistError.message
             });
           }

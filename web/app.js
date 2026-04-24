@@ -110,7 +110,7 @@ function buildImageAssistantContent(data) {
   return [
     {
       type: 'text',
-      text: `已为你生成图片。\n\n调用模型：${data.model || data.upstreamModel || '未知'}${data.upstreamModel && data.upstreamModel !== data.model ? `（上游返回：${data.upstreamModel}）` : ''}\n请求分辨率：${data.sizeUsed || '未知'}${data.fallbackApplied ? '（已自动降级到兼容尺寸）' : ''}\n\n提示词：${data.prompt || ''}${data.revisedPrompt ? `\n\n优化后提示词：${data.revisedPrompt}` : ''}`
+      text: `已为你生成图片。\n\n调用模型：${data.model || data.upstreamModel || '未知'}${data.upstreamModel && data.upstreamModel !== data.model ? `（上游返回：${data.upstreamModel}）` : ''}\n请求分辨率：${data.sizeUsed || '未知'}${data.fallbackApplied ? '（已自动降级到兼容尺寸）' : ''}\n\n提示词：${data.prompt || ''}`
     },
     { type: 'image_url', image_url: { url: safeImageUrl } }
   ];
