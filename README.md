@@ -19,6 +19,7 @@ docker run -d \
   --name easychat \
   -p 7777:7777 \
   -e EASYCHAT_ADMIN_PASSWORD=change-this-password \
+  -e IMAGE_SAME_SIZE_RETRIES=2 \
   -e PUBLIC_BASE_URL=https://你的域名 \
   -v easychat-data:/data \
   --restart unless-stopped \
@@ -29,6 +30,7 @@ docker run -d \
 
 - Docker 镜像默认 `DATA_DIR=/data`，只要挂载 `-v easychat-data:/data`，配置、日志、上传/生成图片、会话历史都会持久化。
 - 仍兼容高级自定义路径：`CONFIG_PATH`、`LOG_PATH`、`UPLOAD_DIR`、`SESSIONS_PATH`，不设置时会自动落到 `DATA_DIR` 下。
+- `IMAGE_SAME_SIZE_RETRIES=2`：同一图片尺寸遇到 429/5xx/超时等临时错误时的重试次数；代码默认就是 `2`，写出来只是方便你显式调整。
 - `PUBLIC_BASE_URL`：用于图片识图场景生成可访问的绝对地址（建议配置）
 
 ### 2) 更新
