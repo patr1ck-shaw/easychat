@@ -396,7 +396,8 @@ function createImageTask() {
     finishedAt: null,
     result: null,
     error: null,
-    details: null
+    details: null,
+    abortController: new AbortController()
   };
   imageTasks.set(id, task);
   return task;
@@ -713,7 +714,7 @@ app.post('/api/chat', requireAdmin, async (req, res) => {
   }
 });
 
-async function generateImageResult(input, publicBaseUrl) {
+async function generateImageResult(input, publicBaseUrl, signal) {
     const { presetId, prompt, size, quality, n, fallbackSizes } = input || {};
     const cleanPrompt = String(prompt || '').trim();
 
@@ -790,6 +791,7 @@ async function generateImageResult(input, publicBaseUrl) {
               'x-api-key': preset.apiKey,
               'Content-Type': 'application/json'
             },
+            signal,
             body: JSON.stringify(payload)
           });
 
@@ -934,17 +936,28 @@ async function generateImageResult(input, publicBaseUrl) {
 }
 
 async function runImageTask(task, input, publicBaseUrl) {
+  if (task.status === 'cancelled') return;
   task.status = 'running';
   task.startedAt = Date.now();
   task.updatedAt = task.startedAt;
 
   try {
-    task.result = await generateImageResult(input, publicBaseUrl);
+    task.result = await generateImageResult(input, publicBaseUrl, task.abortController?.signal);
+    if (task.status === 'cancelled') return;
     task.status = 'succeeded';
     task.finishedAt = Date.now();
     task.updatedAt = task.finishedAt;
     writeLog('INFO', '图片异步任务完成', { taskId: task.id, model: task.result?.model, sizeUsed: task.result?.sizeUsed || 'default' });
   } catch (error) {
+    if (error.name === 'AbortError' || task.abortController?.signal?.aborted || task.status === 'cancelled') {
+      task.status = 'cancelled';
+      task.error = '图片生成已取消';
+      task.details = null;
+      task.finishedAt = Date.now();
+      task.updatedAt = task.finishedAt;
+      writeLog('INFO', '图片异步任务已取消', { taskId: task.id });
+      return;
+    }
     task.status = 'failed';
     task.error = error.message || '生成图片失败';
     task.details = error.details || null;
@@ -989,6 +1002,25 @@ app.get('/api/image-generate/:taskId', requireAdmin, (req, res) => {
   if (!task) {
     return res.status(404).json({ ok: false, error: '图片任务不存在或已过期' });
   }
+  return res.json(serializeImageTask(task));
+});
+
+app.delete('/api/image-generate/:taskId', requireAdmin, (req, res) => {
+  const task = imageTasks.get(String(req.params.taskId || ''));
+  if (!task) {
+    return res.status(404).json({ ok: false, error: '图片任务不存在或已过期' });
+  }
+
+  if (['succeeded', 'failed', 'cancelled'].includes(task.status)) {
+    return res.json(serializeImageTask(task));
+  }
+
+  task.status = 'cancelled';
+  task.error = '图片生成已取消';
+  task.finishedAt = Date.now();
+  task.updatedAt = task.finishedAt;
+  task.abortController?.abort?.();
+  writeLog('INFO', '收到图片任务取消请求', { taskId: task.id });
   return res.json(serializeImageTask(task));
 });
 

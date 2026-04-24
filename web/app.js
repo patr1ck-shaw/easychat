@@ -7,6 +7,7 @@ let sessions = readLocalSessions();
 let currentSessionId = localStorage.getItem(STORAGE_CURRENT_ID_KEY) || null;
 let abortController = null;
 let imageGenerating = false;
+let currentImageTaskId = null;
 let pendingImageDataUrl = '';
 let sessionsSyncTimer = null;
 let sessionsSyncInFlight = false;
@@ -77,6 +78,12 @@ async function pollImageTask(taskId, password, onProgress) {
         ? data.details
         : data?.details?.error?.message || data?.details?.message || JSON.stringify(data?.details || '');
       throw new Error(detailMessage || data.error || '图片生成失败');
+    }
+
+    if (data.status === 'cancelled') {
+      const error = new Error(data.error || '图片生成已取消');
+      error.name = 'ImageTaskCancelled';
+      throw error;
     }
   }
 
@@ -1186,6 +1193,7 @@ async function handleImageGenerate() {
   imageGenerating = true;
   setActionButtonsDisabled(true);
   document.getElementById('loading-tag').classList.remove('hidden');
+  document.getElementById('stop-btn').classList.remove('hidden');
   document.getElementById('loading-tag').textContent = 'Generating image';
   setStatus(`开始生成图片：${preset.name} / ${preset.imageModel || preset.model}`, 'info');
 
@@ -1229,6 +1237,8 @@ async function handleImageGenerate() {
       throw new Error(detailMessage || taskData?.error || `HTTP ${response.status}`);
     }
 
+    currentImageTaskId = taskData.taskId;
+
     setStatus(`图片任务已提交，正在后台生成（任务：${taskData.taskId}）`, 'info');
     assistantMessage.content = `图片任务已提交，正在后台生成...\n\n任务 ID：${taskData.taskId}`;
     renderBubbleContent(aiBubble, assistantMessage.content);
@@ -1270,19 +1280,33 @@ async function handleImageGenerate() {
   } catch (error) {
     const errorContent = `出图失败：${error.message}`;
     assistantMessage.content = errorContent;
-    aiBubble.innerHTML = `<span class="text-red-500">${errorContent}</span>`;
+    aiBubble.innerHTML = `<span class="${error.name === 'ImageTaskCancelled' ? 'text-slate-400' : 'text-red-500'}">${error.name === 'ImageTaskCancelled' ? '图片生成已取消' : errorContent}</span>`;
     saveSessions();
-    setStatus(`出图失败：${error.message}`, 'error');
+    setStatus(error.name === 'ImageTaskCancelled' ? '图片生成已取消' : `出图失败：${error.message}`, error.name === 'ImageTaskCancelled' ? 'info' : 'error');
   } finally {
     imageGenerating = false;
+    currentImageTaskId = null;
     setActionButtonsDisabled(false);
     document.getElementById('loading-tag').classList.add('hidden');
+    document.getElementById('stop-btn').classList.add('hidden');
     document.getElementById('loading-tag').textContent = 'Assistant is typing';
   }
 }
 
 function stopGeneration() {
   if (abortController) abortController.abort();
+  if (imageGenerating && currentImageTaskId) {
+    const password = getAdminPassword();
+    const taskId = currentImageTaskId;
+    currentImageTaskId = null;
+    fetch(`/api/image-generate/${encodeURIComponent(taskId)}`, {
+      method: 'DELETE',
+      headers: {
+        'x-admin-password': password
+      }
+    }).catch((error) => console.warn('取消图片任务失败', error));
+    setStatus('已请求停止图片生成', 'info');
+  }
 }
 
 async function init() {
