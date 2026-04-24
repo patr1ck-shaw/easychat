@@ -467,6 +467,22 @@ function dataUrlSizeKB(dataUrl) {
   return Math.round((String(dataUrl || '').length * 3) / 4 / 1024);
 }
 
+function getDataUrlMime(dataUrl) {
+  return String(dataUrl || '').match(/^data:([^;,]+)[;,]/i)?.[1]?.toLowerCase() || '';
+}
+
+function canvasHasTransparency(ctx, width, height) {
+  try {
+    const imageData = ctx.getImageData(0, 0, width, height).data;
+    for (let index = 3; index < imageData.length; index += 4) {
+      if (imageData[index] < 255) return true;
+    }
+  } catch (_) {
+    // 跨域或浏览器限制读取像素时，保守按不透明处理。
+  }
+  return false;
+}
+
 async function uploadImageDataUrl(dataUrl) {
   const password = requireAdminPasswordOrThrow();
   const res = await fetch('/api/upload-image', {
@@ -506,7 +522,11 @@ async function compressImageDataUrl(dataUrl) {
       }
 
       ctx.drawImage(img, 0, 0, width, height);
-      const compressed = canvas.toDataURL('image/jpeg', IMAGE_QUALITY);
+      const sourceMime = getDataUrlMime(dataUrl);
+      const shouldPreserveAlpha = ['image/png', 'image/webp', 'image/gif'].includes(sourceMime) && canvasHasTransparency(ctx, width, height);
+      const compressed = shouldPreserveAlpha
+        ? canvas.toDataURL('image/png')
+        : canvas.toDataURL('image/jpeg', IMAGE_QUALITY);
       resolve(compressed || dataUrl);
     };
     img.onerror = () => resolve(dataUrl);
