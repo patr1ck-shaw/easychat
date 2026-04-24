@@ -246,6 +246,39 @@ function toDataUrlFromBase64(base64, mime = 'image/png') {
   return `data:${mime};base64,${raw}`;
 }
 
+function findFirstImageResult(value) {
+  if (!value || typeof value !== 'object') return {};
+
+  const directUrl = value.url || value.image_url || value.imageUrl;
+  const directB64 = value.b64_json || value.b64 || value.base64 || value.image_base64;
+  if (directUrl || directB64) {
+    return {
+      ...value,
+      url: typeof directUrl === 'string' ? directUrl : directUrl?.url,
+      b64_json: directB64
+    };
+  }
+
+  if (typeof value.data === 'string' && /^data:image\//i.test(value.data)) {
+    return { ...value, url: value.data };
+  }
+
+  for (const key of ['data', 'images', 'output', 'content', 'choices', 'result', 'results']) {
+    const child = value[key];
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        const found = findFirstImageResult(item);
+        if (found.url || found.b64_json) return found;
+      }
+    } else if (child && typeof child === 'object') {
+      const found = findFirstImageResult(child);
+      if (found.url || found.b64_json) return found;
+    }
+  }
+
+  return {};
+}
+
 function findPresetById(id) {
   const config = loadConfig();
   return config.presets.find((preset) => preset.id === id);
@@ -703,6 +736,13 @@ app.post('/api/image-generate', requireAdmin, async (req, res) => {
         lastStatus = upstream.status;
         lastDetails = data || text;
 
+        writeLog('INFO', '图片生成上游返回错误', {
+          model,
+          size: trySize || 'default',
+          status: upstream.status,
+          details: stringifyErrorDetails(lastDetails).slice(0, 1000)
+        });
+
         if (index < sizeAttempts.length - 1) {
           writeLog('INFO', '图片生成尺寸降级重试', {
             model,
@@ -719,13 +759,22 @@ app.post('/api/image-generate', requireAdmin, async (req, res) => {
         });
       }
 
-      const first = data?.data?.[0] || {};
+      const first = findFirstImageResult(data);
       const upstreamModel = String(data?.model || first?.model || '').trim();
-      let imageUrl = first.url || toDataUrlFromBase64(first.b64_json);
+      const firstUrl = String(first.url || '').trim();
+      const firstB64 = String(first.b64_json || '').trim();
+      const firstMime = String(first.mime_type || first.mime || '').trim().toLowerCase() || 'image/png';
+      let imageUrl = firstUrl || toDataUrlFromBase64(firstB64, firstMime);
 
       if (!imageUrl) {
         lastStatus = 502;
         lastDetails = data || text;
+
+        writeLog('INFO', '图片结果为空', {
+          model,
+          size: trySize || 'default',
+          responsePreview: stringifyErrorDetails(lastDetails).slice(0, 1500)
+        });
 
         if (index < sizeAttempts.length - 1) {
           writeLog('INFO', '图片结果为空，尝试降级尺寸重试', {
@@ -742,20 +791,19 @@ app.post('/api/image-generate', requireAdmin, async (req, res) => {
         });
       }
 
-      if (first.url) {
+      if (firstUrl && /^https?:\/\//i.test(firstUrl)) {
         try {
-          const savedFilename = await persistRemoteImage(first.url);
+          const savedFilename = await persistRemoteImage(firstUrl);
           imageUrl = `${getPublicBaseUrl(req)}/uploads/${savedFilename}`;
         } catch (persistError) {
           writeLog('INFO', '图片持久化失败，回退使用上游直链', {
             message: persistError.message
           });
         }
-      } else if (first.b64_json) {
+      } else if (firstB64) {
         try {
-          const mime = String(first?.mime_type || '').trim().toLowerCase() || 'image/png';
-          const ext = getExtByMime(mime) || 'png';
-          const buffer = Buffer.from(String(first.b64_json), 'base64');
+          const ext = getExtByMime(firstMime) || 'png';
+          const buffer = Buffer.from(firstB64, 'base64');
           if (buffer.length) {
             const savedFilename = saveImageBuffer(buffer, ext);
             imageUrl = `${getPublicBaseUrl(req)}/uploads/${savedFilename}`;

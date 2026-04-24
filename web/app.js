@@ -13,8 +13,8 @@ let sessionsSyncInFlight = false;
 const IMAGE_MAX_WIDTH = 1280;
 const IMAGE_MAX_HEIGHT = 1280;
 const IMAGE_QUALITY = 0.82;
-const IMAGE_GENERATE_PRIMARY_SIZE = '1024x1024';
-const IMAGE_GENERATE_FALLBACK_SIZES = ['1024x1024'];
+const IMAGE_GENERATE_PRIMARY_SIZE = '3840x2160';
+const IMAGE_GENERATE_FALLBACK_SIZES = ['2560x1440', '1920x1080', '1792x1024', '1024x1024'];
 
 function readLocalSessions() {
   try {
@@ -1160,7 +1160,10 @@ async function handleImageGenerate() {
 
     const data = await response.json();
     if (!response.ok || !data?.ok || !data?.url) {
-      throw new Error(data?.details?.error?.message || data?.error || `HTTP ${response.status}`);
+      const detailMessage = typeof data?.details === 'string'
+        ? data.details
+        : data?.details?.error?.message || data?.details?.message || JSON.stringify(data?.details || '');
+      throw new Error(detailMessage || data?.error || `HTTP ${response.status}`);
     }
 
     const safeImageUrl = sanitizeImageUrl(data.url) || data.url;
