@@ -192,7 +192,13 @@ function loadConfig() {
 
 function sanitizeStoredContent(content) {
   if (typeof content === 'string') {
-    return content.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[图片数据已省略]');
+    return content.replace(/data:image\/(png|jpeg|webp|gif);base64,[a-z0-9+/=]+/gi, (dataUrl) => {
+      try {
+        return `/uploads/${saveBase64Image(dataUrl)}`;
+      } catch (_) {
+        return '[图片数据已省略]';
+      }
+    });
   }
 
   if (Array.isArray(content)) {
@@ -206,7 +212,21 @@ function sanitizeStoredContent(content) {
       if (part.type === 'image_url') {
         const rawUrl = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
         if (typeof rawUrl === 'string' && /^data:image\//i.test(rawUrl)) {
-          return { type: 'text', text: '[图片数据已省略]' };
+          try {
+            const storedUrl = `/uploads/${saveBase64Image(rawUrl)}`;
+            if (typeof part.image_url === 'string') {
+              return { ...part, image_url: storedUrl };
+            }
+            return {
+              ...part,
+              image_url: {
+                ...(part.image_url || {}),
+                url: storedUrl
+              }
+            };
+          } catch (_) {
+            return { type: 'text', text: '[图片数据已省略]' };
+          }
         }
       }
 
