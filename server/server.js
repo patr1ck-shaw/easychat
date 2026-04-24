@@ -20,12 +20,13 @@ const ADMIN_PASSWORD = process.env.EASYCHAT_ADMIN_PASSWORD || '';
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(DATA_DIR, 'uploads');
 const LOG_PATH = process.env.LOG_PATH || path.join(DATA_DIR, 'easychat.log');
 const SESSIONS_PATH = process.env.SESSIONS_PATH || path.join(DATA_DIR, 'sessions.json');
+const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || '64mb';
 const IMAGE_TASK_TTL_MS = Number(process.env.IMAGE_TASK_TTL_MS || 60 * 60 * 1000);
 const IMAGE_TASK_CLEANUP_MS = Number(process.env.IMAGE_TASK_CLEANUP_MS || 5 * 60 * 1000);
 
 const imageTasks = new Map();
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
@@ -189,6 +190,33 @@ function loadConfig() {
   return validateConfig(readJson(CONFIG_PATH));
 }
 
+function sanitizeStoredContent(content) {
+  if (typeof content === 'string') {
+    return content.replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[图片数据已省略]');
+  }
+
+  if (Array.isArray(content)) {
+    return content.map((part) => {
+      if (!part || typeof part !== 'object') return part;
+
+      if (part.type === 'text' && typeof part.text === 'string') {
+        return { ...part, text: sanitizeStoredContent(part.text) };
+      }
+
+      if (part.type === 'image_url') {
+        const rawUrl = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+        if (typeof rawUrl === 'string' && /^data:image\//i.test(rawUrl)) {
+          return { type: 'text', text: '[图片数据已省略]' };
+        }
+      }
+
+      return part;
+    });
+  }
+
+  return content ?? '';
+}
+
 function normalizeSessionsStore(input) {
   const rawSessions = Array.isArray(input?.sessions) ? input.sessions : [];
   const sessions = rawSessions
@@ -200,7 +228,7 @@ function normalizeSessionsStore(input) {
             .filter((msg) => msg && typeof msg === 'object')
             .map((msg) => ({
               role: String(msg.role || '').trim() || 'user',
-              content: msg.content ?? ''
+              content: sanitizeStoredContent(msg.content)
             }))
         : [];
       return { id, title, history };
@@ -236,9 +264,9 @@ function loadSessionsStore() {
 function saveSessionsStore(input) {
   const normalized = normalizeSessionsStore(input);
   const text = `${JSON.stringify(normalized, null, 2)}\n`;
-  const maxBytes = 8 * 1024 * 1024;
-  if (Buffer.byteLength(text, 'utf-8') > maxBytes) {
-    throw new Error('会话数据过大，超过 8MB 限制');
+  const maxBytes = Number(process.env.SESSIONS_MAX_BYTES || 0);
+  if (maxBytes > 0 && Buffer.byteLength(text, 'utf-8') > maxBytes) {
+    throw new Error(`会话数据过大，超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制`);
   }
   fs.writeFileSync(SESSIONS_PATH, text, 'utf-8');
   return normalized;
@@ -363,9 +391,9 @@ async function persistRemoteImage(remoteUrl) {
     throw new Error('上游图片为空');
   }
 
-  const maxBytes = 20 * 1024 * 1024;
+  const maxBytes = Number(process.env.IMAGE_MAX_BYTES || 32 * 1024 * 1024);
   if (buffer.length > maxBytes) {
-    throw new Error('上游图片过大（超过 20MB）');
+    throw new Error(`上游图片过大（超过 ${Math.round(maxBytes / 1024 / 1024)}MB）`);
   }
 
   const contentType = String(upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();

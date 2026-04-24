@@ -3,7 +3,7 @@ let adminConfig = null;
 let currentPresetId = null;
 const STORAGE_SESSIONS_KEY = 'easychat-sessions';
 const STORAGE_CURRENT_ID_KEY = 'easychat-current-id';
-let sessions = readLocalSessions();
+let sessions = [];
 let currentSessionId = localStorage.getItem(STORAGE_CURRENT_ID_KEY) || null;
 let abortController = null;
 let imageGenerating = false;
@@ -157,17 +157,19 @@ async function refreshStoredImageTasks(session) {
   }
 }
 
-function readLocalSessions() {
+function clearLegacyLocalSessions() {
+  // 会话历史以后以后端 /api/sessions 为准。
+  // 旧版本曾把完整 history 写入 localStorage，4K 出图/截图很容易触发浏览器 5~10MB 配额，
+  // 这里主动清理旧缓存，只保留 currentSessionId、主题、预设等轻量偏好。
   try {
-    const raw = JSON.parse(localStorage.getItem(STORAGE_SESSIONS_KEY));
-    return Array.isArray(raw) ? raw : [];
+    localStorage.removeItem(STORAGE_SESSIONS_KEY);
   } catch (_) {
-    return [];
+    // ignore
   }
 }
 
 function syncSessionsToLocalStorage() {
-  localStorage.setItem(STORAGE_SESSIONS_KEY, JSON.stringify(sessions));
+  // 不再把 sessions/history 写入 localStorage，避免大图/长对话撑爆浏览器存储。
   localStorage.setItem(STORAGE_CURRENT_ID_KEY, currentSessionId || '');
 }
 
@@ -379,27 +381,13 @@ function shrinkSessionsForStorage() {
 }
 
 function saveSessions() {
-  for (let i = 0; i < 6; i += 1) {
-    try {
-      syncSessionsToLocalStorage();
-      scheduleSessionsSync();
-      return true;
-    } catch (error) {
-      if (!isQuotaExceededError(error)) {
-        console.error('保存会话失败', error);
-        return false;
-      }
-
-      const shrunk = shrinkSessionsForStorage();
-      if (!shrunk) {
-        console.error('本地存储空间不足，且无法继续压缩会话数据');
-        return false;
-      }
-    }
+  try {
+    syncSessionsToLocalStorage();
+  } catch (error) {
+    console.warn('保存当前会话 ID 到本地失败；完整会话仍会同步到后端', error);
   }
-
-  console.error('本地存储空间不足，保存会话未完全成功');
-  return false;
+  scheduleSessionsSync();
+  return true;
 }
 
 function sanitizeHtml(html) {
@@ -711,6 +699,17 @@ function clearAllData() {
   if (!confirm('清空所有本地会话记录？')) return;
   localStorage.removeItem(STORAGE_SESSIONS_KEY);
   localStorage.removeItem(STORAGE_CURRENT_ID_KEY);
+  const password = getAdminPassword();
+  if (password) {
+    fetch('/api/sessions', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
+      body: JSON.stringify({ sessions: [], currentSessionId: null })
+    }).catch((error) => console.warn('清空服务端会话失败', error));
+  }
   location.reload();
 }
 
@@ -1417,6 +1416,8 @@ function stopGeneration() {
 }
 
 async function init() {
+  clearLegacyLocalSessions();
+
   if (localStorage.getItem('easychat-dark') === 'true') {
     document.documentElement.classList.add('dark');
   }
