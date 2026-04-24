@@ -459,8 +459,13 @@ function sanitizeImageUrl(url) {
   if (!value) return '';
   if (/^https?:\/\//i.test(value)) return value;
   if (/^\/uploads\//i.test(value)) return value;
-  if (/^data:image\//i.test(value)) return value;
+  if (/^data:image\/(png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i.test(value)) return value;
   return '';
+}
+
+function setErrorBubble(bubble, prefix, message) {
+  bubble.textContent = `${prefix}${message || '未知错误'}`;
+  bubble.classList.add('text-red-500');
 }
 
 function dataUrlSizeKB(dataUrl) {
@@ -816,10 +821,18 @@ function renderHistoryList() {
         : 'hover:bg-slate-50/40 dark:hover:bg-slate-800/40 text-slate-500'
     }`;
     row.onclick = () => loadSession(s.id);
-    row.innerHTML = `
-      <span class="truncate text-xs flex-1">${s.title}</span>
-      <button onclick="deleteSession(event, '${s.id}')" class="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition">✕</button>
-    `;
+
+    const title = document.createElement('span');
+    title.className = 'truncate text-xs flex-1';
+    title.textContent = s.title;
+
+    const del = document.createElement('button');
+    del.className = 'opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition';
+    del.textContent = '✕';
+    del.onclick = (event) => deleteSession(event, s.id);
+
+    row.appendChild(title);
+    row.appendChild(del);
     list.appendChild(row);
   });
 }
@@ -879,7 +892,11 @@ function renderBubble(role, content) {
 
   const meta = document.createElement('div');
   meta.className = 'mb-2 px-2 flex items-center gap-2';
-  meta.innerHTML = `<span class="text-[9px] font-bold text-slate-400 dark:text-slate-600 uppercase tracking-widest">${role}</span>`;
+
+  const roleLabel = document.createElement('span');
+  roleLabel.className = 'text-[9px] font-bold text-slate-400 dark:text-slate-600 uppercase tracking-widest';
+  roleLabel.textContent = role;
+  meta.appendChild(roleLabel);
 
   const copyBtn = document.createElement('button');
   copyBtn.className = 'text-[10px] text-slate-400 hover:text-blue-500 transition';
@@ -1279,7 +1296,7 @@ async function handleSend() {
         aiBubble.innerHTML = '<span class="text-slate-400">已停止生成</span>';
       }
     } else {
-      aiBubble.innerHTML = `<span class="text-red-500">错误：${error.message}</span>`;
+      setErrorBubble(aiBubble, '错误：', error.message);
       setStatus(`聊天失败：${error.message}`, 'error');
     }
   } finally {
@@ -1406,7 +1423,8 @@ async function handleImageGenerate() {
   } catch (error) {
     const errorContent = `出图失败：${error.message}`;
     assistantMessage.content = errorContent;
-    aiBubble.innerHTML = `<span class="${error.name === 'ImageTaskCancelled' ? 'text-slate-400' : 'text-red-500'}">${error.name === 'ImageTaskCancelled' ? '图片生成已取消' : errorContent}</span>`;
+      aiBubble.textContent = error.name === 'ImageTaskCancelled' ? '图片生成已取消' : errorContent;
+      aiBubble.classList.add(error.name === 'ImageTaskCancelled' ? 'text-slate-400' : 'text-red-500');
     saveSessions();
     setStatus(error.name === 'ImageTaskCancelled' ? '图片生成已取消' : `出图失败：${error.message}`, error.name === 'ImageTaskCancelled' ? 'info' : 'error');
   } finally {

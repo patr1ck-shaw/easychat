@@ -1,6 +1,8 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import dns from 'dns';
+import net from 'net';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
@@ -23,8 +25,27 @@ const SESSIONS_PATH = process.env.SESSIONS_PATH || path.join(DATA_DIR, 'sessions
 const JSON_BODY_LIMIT = process.env.JSON_BODY_LIMIT || '64mb';
 const IMAGE_TASK_TTL_MS = Number(process.env.IMAGE_TASK_TTL_MS || 60 * 60 * 1000);
 const IMAGE_TASK_CLEANUP_MS = Number(process.env.IMAGE_TASK_CLEANUP_MS || 5 * 60 * 1000);
+const MAX_IMAGE_TASKS = Number(process.env.MAX_IMAGE_TASKS || 20);
+const TEST_FETCH_TIMEOUT_MS = Number(process.env.TEST_FETCH_TIMEOUT_MS || 15 * 1000);
+const CHAT_FETCH_TIMEOUT_MS = Number(process.env.CHAT_FETCH_TIMEOUT_MS || 10 * 60 * 1000);
+const IMAGE_FETCH_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_TIMEOUT_MS || 10 * 60 * 1000);
+const REMOTE_IMAGE_FETCH_TIMEOUT_MS = Number(process.env.REMOTE_IMAGE_FETCH_TIMEOUT_MS || 30 * 1000);
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60 * 1000);
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 180);
+const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX || 30);
+const RATE_LIMIT_HEAVY_MAX = Number(process.env.RATE_LIMIT_HEAVY_MAX || 30);
 
 const imageTasks = new Map();
+
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 
 app.use(express.json({ limit: JSON_BODY_LIMIT }));
 app.use((req, res, next) => {
@@ -34,6 +55,45 @@ app.use((req, res, next) => {
   });
   next();
 });
+
+function createRateLimiter({ windowMs, max, keyPrefix }) {
+  const buckets = new Map();
+  return (req, res, next) => {
+    if (max <= 0) return next();
+    const now = Date.now();
+    const key = `${keyPrefix}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+    const bucket = buckets.get(key);
+    if (!bucket || bucket.resetAt <= now) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    bucket.count += 1;
+    if (bucket.count > max) {
+      res.setHeader('Retry-After', String(Math.ceil((bucket.resetAt - now) / 1000)));
+      return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+    }
+    return next();
+  };
+}
+
+const generalRateLimit = createRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS, max: RATE_LIMIT_MAX, keyPrefix: 'general' });
+const authRateLimit = createRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS, max: RATE_LIMIT_AUTH_MAX, keyPrefix: 'auth' });
+const heavyRateLimit = createRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS, max: RATE_LIMIT_HEAVY_MAX, keyPrefix: 'heavy' });
+
+app.use('/api', generalRateLimit);
+
+function applyRouteRateLimit(req, res, next) {
+  if (['/api/chat', '/api/image-generate', '/api/upload-image', '/api/test'].includes(req.path)) {
+    return heavyRateLimit(req, res, next);
+  }
+  if (req.path.startsWith('/api/admin') || req.path === '/api/config') {
+    return authRateLimit(req, res, next);
+  }
+  return next();
+}
+
+app.use(applyRouteRateLimit);
 
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -60,6 +120,75 @@ function writeLog(level, message, extra = null) {
     } catch (error) {
       console.error(`[LOG_WRITE_ERROR] ${error.message}`);
     }
+  }
+}
+
+function writeJsonAtomic(filepath, text) {
+  const tmpPath = `${filepath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmpPath, text, 'utf-8');
+  fs.renameSync(tmpPath, filepath);
+}
+
+function mergeAbortSignals(signals) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of signals.filter(Boolean)) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+  }
+  return controller;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30 * 1000) {
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+  const signalController = mergeAbortSignals([options.signal, timeoutController.signal]);
+  try {
+    return await fetch(url, { ...options, signal: signalController.signal });
+  } catch (error) {
+    if (timeoutController.signal.aborted) {
+      const timeoutError = new Error(`请求超时（${Math.round(timeoutMs / 1000)}秒）`);
+      timeoutError.name = 'TimeoutError';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  const version = net.isIP(ip);
+  if (version === 4) {
+    const parts = ip.split('.').map((part) => Number(part));
+    const [a, b] = parts;
+    return a === 10 || a === 127 || a === 0 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168);
+  }
+  if (version === 6) {
+    const value = ip.toLowerCase();
+    return value === '::1' || value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80:');
+  }
+  return true;
+}
+
+async function assertSafeRemoteImageUrl(remoteUrl) {
+  const parsed = new URL(String(remoteUrl || ''));
+  if (parsed.protocol !== 'https:') {
+    throw new Error('仅允许持久化 HTTPS 图片地址');
+  }
+  if (!parsed.hostname || ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname.toLowerCase())) {
+    throw new Error('不允许访问本机图片地址');
+  }
+  const records = await dns.promises.lookup(parsed.hostname, { all: true, verbatim: false });
+  if (!records.length || records.some((record) => isPrivateIp(record.address))) {
+    throw new Error('不允许访问内网图片地址');
   }
 }
 
@@ -278,7 +407,7 @@ function normalizeSessionsStore(input) {
 function ensureSessionsFile() {
   if (fs.existsSync(SESSIONS_PATH)) return;
   const initial = normalizeSessionsStore({ sessions: [], currentSessionId: null });
-  fs.writeFileSync(SESSIONS_PATH, `${JSON.stringify(initial, null, 2)}\n`, 'utf-8');
+  writeJsonAtomic(SESSIONS_PATH, `${JSON.stringify(initial, null, 2)}\n`);
 }
 
 function loadSessionsStore() {
@@ -288,7 +417,7 @@ function loadSessionsStore() {
     return normalizeSessionsStore(raw);
   } catch (_) {
     const fallback = normalizeSessionsStore({ sessions: [], currentSessionId: null });
-    fs.writeFileSync(SESSIONS_PATH, `${JSON.stringify(fallback, null, 2)}\n`, 'utf-8');
+    writeJsonAtomic(SESSIONS_PATH, `${JSON.stringify(fallback, null, 2)}\n`);
     return fallback;
   }
 }
@@ -300,13 +429,13 @@ function saveSessionsStore(input) {
   if (maxBytes > 0 && Buffer.byteLength(text, 'utf-8') > maxBytes) {
     throw new Error(`会话数据过大，超过 ${Math.round(maxBytes / 1024 / 1024)}MB 限制`);
   }
-  fs.writeFileSync(SESSIONS_PATH, text, 'utf-8');
+  writeJsonAtomic(SESSIONS_PATH, text);
   return normalized;
 }
 
 function saveConfig(config) {
   const normalized = validateConfig(config);
-  fs.writeFileSync(CONFIG_PATH, `${JSON.stringify(normalized, null, 2)}\n`, 'utf-8');
+  writeJsonAtomic(CONFIG_PATH, `${JSON.stringify(normalized, null, 2)}\n`);
   return normalized;
 }
 
@@ -412,9 +541,15 @@ function saveImageBuffer(buffer, extHint = 'png') {
 }
 
 async function persistRemoteImage(remoteUrl) {
-  const upstream = await fetch(remoteUrl);
+  await assertSafeRemoteImageUrl(remoteUrl);
+  const upstream = await fetchWithTimeout(remoteUrl, {}, REMOTE_IMAGE_FETCH_TIMEOUT_MS);
   if (!upstream.ok) {
     throw new Error(`拉取上游图片失败 HTTP ${upstream.status}`);
+  }
+
+  const contentType = String(upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!getExtByMime(contentType)) {
+    throw new Error('上游返回的不是受支持的图片类型');
   }
 
   const arr = await upstream.arrayBuffer();
@@ -428,7 +563,6 @@ async function persistRemoteImage(remoteUrl) {
     throw new Error(`上游图片过大（超过 ${Math.round(maxBytes / 1024 / 1024)}MB）`);
   }
 
-  const contentType = String(upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
   const extByMime = getExtByMime(contentType);
   const extByUrl = inferExtFromUrl(remoteUrl);
   const ext = extByMime || extByUrl || 'png';
@@ -445,6 +579,17 @@ function getPublicBaseUrl(req) {
 }
 
 function createImageTask() {
+  cleanupImageTasks();
+  if (imageTasks.size >= MAX_IMAGE_TASKS) {
+    const oldest = [...imageTasks.values()].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+    if (!oldest || !['succeeded', 'failed', 'cancelled'].includes(oldest.status)) {
+      const error = new Error('图片任务过多，请稍后再试');
+      error.status = 429;
+      throw error;
+    }
+    imageTasks.delete(oldest.id);
+  }
+
   const id = `img-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const now = Date.now();
   const task = {
@@ -653,7 +798,7 @@ app.post('/api/test', requireAdmin, async (req, res) => {
 
     const url = `${normalizeBaseUrl(preset.baseUrl)}/chat/completions`;
 
-    const upstream = await fetch(url, {
+    const upstream = await fetchWithTimeout(url, {
       method: 'POST',
       headers: buildUpstreamHeaders(preset.apiKey),
       body: JSON.stringify({
@@ -662,7 +807,7 @@ app.post('/api/test', requireAdmin, async (req, res) => {
         max_tokens: 1,
         stream: false
       })
-    });
+    }, TEST_FETCH_TIMEOUT_MS);
 
     const text = await upstream.text();
 
@@ -723,7 +868,7 @@ app.post('/api/chat', requireAdmin, async (req, res) => {
     const url = `${normalizeBaseUrl(preset.baseUrl)}/chat/completions`;
     const upstreamMessages = normalizeUpstreamMessages(messages, req);
 
-    const upstream = await fetch(url, {
+    const upstream = await fetchWithTimeout(url, {
       method: 'POST',
       headers: buildUpstreamHeaders(preset.apiKey),
       body: JSON.stringify({
@@ -731,7 +876,7 @@ app.post('/api/chat', requireAdmin, async (req, res) => {
         messages: [buildSystemMessage(), ...upstreamMessages],
         stream: Boolean(stream)
       })
-    });
+    }, CHAT_FETCH_TIMEOUT_MS);
 
     if (!upstream.ok) {
       const text = await upstream.text();
@@ -841,12 +986,12 @@ async function generateImageResult(input, publicBaseUrl, signal) {
           if (quality) payload.quality = String(quality);
           if (Number.isInteger(n) && n > 0 && n <= 4) payload.n = n;
 
-          upstream = await fetch(url, {
+          upstream = await fetchWithTimeout(url, {
             method: 'POST',
             headers: buildUpstreamHeaders(preset.apiKey),
             signal,
             body: JSON.stringify(payload)
-          });
+          }, IMAGE_FETCH_TIMEOUT_MS);
 
           text = await upstream.text();
           data = null;
@@ -1056,7 +1201,7 @@ app.post('/api/image-generate', requireAdmin, (req, res) => {
     });
   } catch (error) {
     writeLog('ERROR', '创建图片异步任务失败', { message: error.message });
-    return res.status(500).json({ error: error.message || '创建图片任务失败' });
+    return res.status(error.status || 500).json({ error: error.message || '创建图片任务失败' });
   }
 });
 
@@ -1090,8 +1235,22 @@ app.delete('/api/image-generate/:taskId', requireAdmin, (req, res) => {
   return res.json(serializeImageTask(task));
 });
 
-app.use('/uploads', express.static(UPLOAD_DIR));
-app.use(express.static(WEB_ROOT));
+app.use('/uploads', express.static(UPLOAD_DIR, {
+  fallthrough: false,
+  maxAge: '7d',
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+  }
+}));
+app.use(express.static(WEB_ROOT, {
+  maxAge: '1h',
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  }
+}));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(WEB_ROOT, 'index.html'));
