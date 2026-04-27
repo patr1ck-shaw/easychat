@@ -215,14 +215,20 @@ function normalizeBaseUrl(baseUrl) {
   return String(baseUrl || '').trim().replace(/\/+$/, '');
 }
 
-function buildUpstreamHeaders(apiKey, extra = {}) {
+function buildUpstreamHeaders(apiKey, extra = {}, options = {}) {
   const cleanKey = String(apiKey || '').trim();
+  const includeCompatKeys = options.includeCompatKeys !== false;
+  const compatHeaders = includeCompatKeys
+    ? {
+        // 兼容不同网关：OpenAI 常用 Bearer，部分中转识别 x-api-key，Google/Gemini 兼容层识别 x-goog-api-key。
+        'x-api-key': cleanKey,
+        'x-goog-api-key': cleanKey
+      }
+    : {};
   return {
     Authorization: `Bearer ${cleanKey}`,
-    // 兼容不同网关：OpenAI 常用 Bearer，部分中转识别 x-api-key，Google/Gemini 兼容层识别 x-goog-api-key。
-    'x-api-key': cleanKey,
-    'x-goog-api-key': cleanKey,
     'Content-Type': 'application/json',
+    ...compatHeaders,
     ...extra
   };
 }
@@ -995,7 +1001,7 @@ async function generateImageResult(input, publicBaseUrl, signal) {
 
           upstream = await fetchWithTimeout(url, {
             method: 'POST',
-            headers: buildUpstreamHeaders(preset.apiKey),
+            headers: buildUpstreamHeaders(preset.apiKey, {}, { includeCompatKeys: false }),
             signal,
             body: JSON.stringify(payload)
           }, IMAGE_FETCH_TIMEOUT_MS);
