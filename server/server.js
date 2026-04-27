@@ -39,6 +39,7 @@ const imageTasks = new Map();
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+app.set('etag', false);
 
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -82,6 +83,12 @@ const authRateLimit = createRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS, max: R
 const heavyRateLimit = createRateLimiter({ windowMs: RATE_LIMIT_WINDOW_MS, max: RATE_LIMIT_HEAVY_MAX, keyPrefix: 'heavy' });
 
 app.use('/api', generalRateLimit);
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
 
 function applyRouteRateLimit(req, res, next) {
   if (['/api/chat', '/api/image-generate', '/api/upload-image', '/api/test'].includes(req.path)) {
