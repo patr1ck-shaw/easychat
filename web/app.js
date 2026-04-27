@@ -706,8 +706,8 @@ function toggleSidebar() {
   if (!sb || !ov) return;
 
   const forceOpen = arguments.length > 0 ? Boolean(arguments[0]) : null;
-  const isHidden = sb.classList.contains('-translate-x-full');
-  const shouldOpen = forceOpen === null ? isHidden : forceOpen;
+  const isOpen = !sb.classList.contains('-translate-x-full');
+  const shouldOpen = forceOpen === null ? !isOpen : forceOpen;
 
   if (sidebarHideTimer) {
     clearTimeout(sidebarHideTimer);
@@ -717,10 +717,13 @@ function toggleSidebar() {
   if (shouldOpen) {
     sb.classList.remove('-translate-x-full');
     ov.classList.remove('hidden');
+    ov.style.pointerEvents = 'auto';
     requestAnimationFrame(() => ov.classList.add('opacity-100'));
   } else {
     sb.classList.add('-translate-x-full');
     ov.classList.remove('opacity-100');
+    // 关闭动画期间立即禁用遮罩点击，避免双击触发遮罩残留拦截导致“卡住”。
+    ov.style.pointerEvents = 'none';
     sidebarHideTimer = setTimeout(() => {
       if (sb.classList.contains('-translate-x-full')) {
         ov.classList.add('hidden');
@@ -728,6 +731,22 @@ function toggleSidebar() {
       sidebarHideTimer = null;
     }, 300);
   }
+}
+
+function bindSidebarOutsideClose() {
+  const sidebar = document.getElementById('sidebar');
+  const gearBtn = document.getElementById('gear-btn');
+  if (!sidebar || !gearBtn) return;
+
+  const closeWhenPointerDownOutside = (event) => {
+    if (sidebar.classList.contains('-translate-x-full')) return;
+    const target = event.target;
+    if (sidebar.contains(target) || gearBtn.contains(target)) return;
+    toggleSidebar(false);
+  };
+
+  // 用 pointerdown 一次性覆盖 click/dblclick，避免双击导致竞态。
+  document.addEventListener('pointerdown', closeWhenPointerDownOutside, true);
 }
 
 function toggleDarkMode() {
@@ -1496,6 +1515,7 @@ async function init() {
   if (sidebarOverlay) {
     sidebarOverlay.onclick = () => toggleSidebar(false);
   }
+  bindSidebarOutsideClose();
   updateImagePreview();
 
   try {
