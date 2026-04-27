@@ -1244,9 +1244,10 @@ app.use('/uploads', express.static(UPLOAD_DIR, {
   }
 }));
 app.use(express.static(WEB_ROOT, {
-  maxAge: '1h',
+  maxAge: 0,
   setHeaders: (res, filePath) => {
-    if (filePath.endsWith('index.html')) {
+    // 前端脚本更新后要尽快生效，避免 Docker/浏览器缓存导致“修了但用户端不生效”。
+    if (filePath.endsWith('index.html') || filePath.endsWith('app.js')) {
       res.setHeader('Cache-Control', 'no-cache');
     }
   }
