@@ -11,6 +11,7 @@ let currentImageTaskId = null;
 let pendingImageDataUrl = '';
 let sessionsSyncTimer = null;
 let sessionsSyncInFlight = false;
+let sidebarHideTimer = null;
 const IMAGE_MAX_WIDTH = 1280;
 const IMAGE_MAX_HEIGHT = 1280;
 const IMAGE_QUALITY = 0.82;
@@ -702,16 +703,30 @@ function setStatus(message, type = 'info') {
 function toggleSidebar() {
   const sb = document.getElementById('sidebar');
   const ov = document.getElementById('sidebar-overlay');
-  const isHidden = sb.classList.contains('-translate-x-full');
+  if (!sb || !ov) return;
 
-  if (isHidden) {
+  const forceOpen = arguments.length > 0 ? Boolean(arguments[0]) : null;
+  const isHidden = sb.classList.contains('-translate-x-full');
+  const shouldOpen = forceOpen === null ? isHidden : forceOpen;
+
+  if (sidebarHideTimer) {
+    clearTimeout(sidebarHideTimer);
+    sidebarHideTimer = null;
+  }
+
+  if (shouldOpen) {
     sb.classList.remove('-translate-x-full');
     ov.classList.remove('hidden');
-    setTimeout(() => ov.classList.add('opacity-100'), 10);
+    requestAnimationFrame(() => ov.classList.add('opacity-100'));
   } else {
     sb.classList.add('-translate-x-full');
     ov.classList.remove('opacity-100');
-    setTimeout(() => ov.classList.add('hidden'), 300);
+    sidebarHideTimer = setTimeout(() => {
+      if (sb.classList.contains('-translate-x-full')) {
+        ov.classList.add('hidden');
+      }
+      sidebarHideTimer = null;
+    }, 300);
   }
 }
 
@@ -1477,6 +1492,10 @@ async function init() {
   });
 
   document.getElementById('user-input')?.addEventListener('paste', handleUserInputPaste);
+  const sidebarOverlay = document.getElementById('sidebar-overlay');
+  if (sidebarOverlay) {
+    sidebarOverlay.onclick = () => toggleSidebar(false);
+  }
   updateImagePreview();
 
   try {
