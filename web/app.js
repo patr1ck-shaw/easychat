@@ -110,12 +110,18 @@ function isUnfinishedImageTaskMessage(content) {
 
 function buildImageAssistantContent(data) {
   const safeImageUrl = sanitizeImageUrl(data.url) || data.url;
+  const safeThumbnailUrl = sanitizeImageUrl(data.thumbnailUrl || data.thumbnail_url || data.previewUrl || data.preview_url);
+  const imageUrlPayload = { url: safeImageUrl };
+  if (safeThumbnailUrl && safeThumbnailUrl !== safeImageUrl) imageUrlPayload.thumbnailUrl = safeThumbnailUrl;
+  if (Number(data.width || 0) > 0) imageUrlPayload.width = Number(data.width);
+  if (Number(data.height || 0) > 0) imageUrlPayload.height = Number(data.height);
+
   return [
     {
       type: 'text',
       text: `已为你生成图片。\n\n调用模型：${data.model || data.upstreamModel || '未知'}${data.upstreamModel && data.upstreamModel !== data.model ? `（上游返回：${data.upstreamModel}）` : ''}\n请求分辨率：${data.sizeUsed || '未知'}${data.fallbackApplied ? '（已自动降级到兼容尺寸）' : ''}\n\n提示词：${data.prompt || ''}`
     },
-    { type: 'image_url', image_url: { url: safeImageUrl } }
+    { type: 'image_url', image_url: imageUrlPayload }
   ];
 }
 
@@ -542,13 +548,34 @@ async function compressImageDataUrl(dataUrl) {
   });
 }
 
-function extractImageUrl(part) {
-  if (!part || part.type !== 'image_url') return '';
-  if (typeof part.image_url === 'string') return sanitizeImageUrl(part.image_url);
-  if (part.image_url && typeof part.image_url === 'object') {
-    return sanitizeImageUrl(part.image_url.url);
+function extractImageAsset(part) {
+  if (!part || part.type !== 'image_url') return null;
+
+  if (typeof part.image_url === 'string') {
+    const url = sanitizeImageUrl(part.image_url);
+    return url ? { url, displayUrl: url, thumbnailUrl: '', width: 0, height: 0 } : null;
   }
-  return '';
+
+  if (part.image_url && typeof part.image_url === 'object') {
+    const url = sanitizeImageUrl(part.image_url.url);
+    const thumbnailUrl = sanitizeImageUrl(
+      part.image_url.thumbnailUrl || part.image_url.thumbnail_url || part.image_url.previewUrl || part.image_url.preview_url
+    );
+    if (!url && !thumbnailUrl) return null;
+    return {
+      url: url || thumbnailUrl,
+      displayUrl: thumbnailUrl || url,
+      thumbnailUrl: thumbnailUrl || '',
+      width: Number(part.image_url.width || 0),
+      height: Number(part.image_url.height || 0)
+    };
+  }
+
+  return null;
+}
+
+function extractImageUrl(part) {
+  return extractImageAsset(part)?.url || '';
 }
 
 function normalizeMessageContent(content) {
@@ -559,8 +586,8 @@ function normalizeMessageContent(content) {
     content.forEach((part) => {
       if (!part) return;
       if (part.type === 'text' && part.text) textParts.push(String(part.text));
-      const imageUrl = extractImageUrl(part);
-      if (imageUrl) images.push(imageUrl);
+      const imageAsset = extractImageAsset(part);
+      if (imageAsset) images.push(imageAsset);
     });
 
     return {
@@ -586,20 +613,47 @@ function renderBubbleContent(bubble, content) {
     bubble.appendChild(textBlock);
   }
 
-  normalized.images.forEach((url) => {
+  normalized.images.forEach((image) => {
+    const asset = typeof image === 'string' ? { url: image, displayUrl: image, thumbnailUrl: '' } : image;
+    const originalUrl = asset.url;
+    const displayUrl = asset.displayUrl || asset.thumbnailUrl || originalUrl;
+    if (!displayUrl) return;
+
+    const link = document.createElement('a');
+    link.href = originalUrl || displayUrl;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = asset.thumbnailUrl && asset.thumbnailUrl !== originalUrl ? '点击查看原图' : '点击查看图片';
+
     const img = document.createElement('img');
-    img.src = url;
-    img.alt = 'user-image';
+    img.src = displayUrl;
+    img.alt = 'chat-image';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    if (asset.width > 0) img.width = asset.width;
+    if (asset.height > 0) img.height = asset.height;
     img.className = 'mt-3 rounded-xl max-h-72 w-auto border border-white/20 dark:border-slate-700';
-    bubble.appendChild(img);
+    link.appendChild(img);
+    bubble.appendChild(link);
 
     const actions = document.createElement('div');
-    actions.className = 'mt-1';
+    actions.className = 'mt-1 flex flex-wrap items-center gap-3';
+
+    if (originalUrl && originalUrl !== displayUrl) {
+      const originalLink = document.createElement('a');
+      originalLink.href = originalUrl;
+      originalLink.target = '_blank';
+      originalLink.rel = 'noopener noreferrer';
+      originalLink.className = 'text-[11px] text-blue-500 hover:text-blue-600 transition';
+      originalLink.textContent = '查看原图';
+      actions.appendChild(originalLink);
+    }
+
     const downloadBtn = document.createElement('button');
     downloadBtn.type = 'button';
     downloadBtn.className = 'text-[11px] text-blue-500 hover:text-blue-600 transition';
-    downloadBtn.textContent = '下载图片';
-    downloadBtn.onclick = () => downloadImage(url);
+    downloadBtn.textContent = originalUrl && originalUrl !== displayUrl ? '下载原图' : '下载图片';
+    downloadBtn.onclick = () => downloadImage(originalUrl || displayUrl);
     actions.appendChild(downloadBtn);
     bubble.appendChild(actions);
   });
@@ -620,6 +674,8 @@ function updateImagePreview() {
     return;
   }
 
+  img.loading = 'lazy';
+  img.decoding = 'async';
   img.src = imageUrl;
   wrap.classList.remove('hidden');
 }
@@ -895,7 +951,8 @@ function stringifyMessageForCopy(content) {
   const blocks = [];
   if (normalized.text) blocks.push(normalized.text);
 
-  normalized.images.forEach((url) => {
+  normalized.images.forEach((image) => {
+    const url = typeof image === 'string' ? image : image.url;
     if (/^data:image\//i.test(url)) {
       blocks.push('[截图图片]');
     } else {

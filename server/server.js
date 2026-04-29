@@ -5,6 +5,7 @@ import dns from 'dns';
 import net from 'net';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import sharp from 'sharp';
 
 dotenv.config();
 
@@ -30,6 +31,8 @@ const TEST_FETCH_TIMEOUT_MS = Number(process.env.TEST_FETCH_TIMEOUT_MS || 15 * 1
 const CHAT_FETCH_TIMEOUT_MS = Number(process.env.CHAT_FETCH_TIMEOUT_MS || 10 * 60 * 1000);
 const IMAGE_FETCH_TIMEOUT_MS = Number(process.env.IMAGE_FETCH_TIMEOUT_MS || 10 * 60 * 1000);
 const REMOTE_IMAGE_FETCH_TIMEOUT_MS = Number(process.env.REMOTE_IMAGE_FETCH_TIMEOUT_MS || 30 * 1000);
+const IMAGE_THUMBNAIL_MAX_SIZE = Math.max(256, Number(process.env.IMAGE_THUMBNAIL_MAX_SIZE || 1536));
+const IMAGE_THUMBNAIL_QUALITY = Math.min(95, Math.max(40, Number(process.env.IMAGE_THUMBNAIL_QUALITY || 82)));
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60 * 1000);
 const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 180);
 const RATE_LIMIT_AUTH_MAX = Number(process.env.RATE_LIMIT_AUTH_MAX || 30);
@@ -543,6 +546,66 @@ function inferExtFromUrl(url) {
   }
 }
 
+function createUploadUrl(publicBaseUrl, filename) {
+  return filename ? `${publicBaseUrl}/uploads/${filename}` : '';
+}
+
+function buildStoredImageResponse(asset, publicBaseUrl) {
+  const filename = typeof asset === 'string' ? asset : asset?.filename;
+  const thumbnailFilename = typeof asset === 'object' ? asset?.thumbnailFilename : '';
+  return {
+    filename,
+    thumbnailFilename: thumbnailFilename || '',
+    url: createUploadUrl(publicBaseUrl, filename),
+    thumbnailUrl: createUploadUrl(publicBaseUrl, thumbnailFilename),
+    width: typeof asset === 'object' ? Number(asset?.width || 0) : 0,
+    height: typeof asset === 'object' ? Number(asset?.height || 0) : 0
+  };
+}
+
+async function inspectImageDimensions(buffer, originalFilename) {
+  try {
+    const metadata = await sharp(buffer, { animated: false }).metadata();
+    return {
+      width: Number(metadata.width || 0),
+      height: Number(metadata.height || 0)
+    };
+  } catch (error) {
+    writeLog('INFO', '读取图片尺寸失败', {
+      originalFilename,
+      message: error.message
+    });
+    return { width: 0, height: 0 };
+  }
+}
+
+async function createImageThumbnail(buffer, originalFilename) {
+  const dimensions = await inspectImageDimensions(buffer, originalFilename);
+  const base = path.basename(originalFilename, path.extname(originalFilename));
+  const thumbnailFilename = `${base}-thumb.webp`;
+  const thumbnailPath = path.join(UPLOAD_DIR, thumbnailFilename);
+
+  try {
+    await sharp(buffer, { animated: false })
+      .rotate()
+      .resize({
+        width: IMAGE_THUMBNAIL_MAX_SIZE,
+        height: IMAGE_THUMBNAIL_MAX_SIZE,
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .webp({ quality: IMAGE_THUMBNAIL_QUALITY })
+      .toFile(thumbnailPath);
+    return { thumbnailFilename, ...dimensions };
+  } catch (error) {
+    writeLog('INFO', '图片缩略图生成失败，继续使用原图', {
+      originalFilename,
+      message: error.message
+    });
+    return { thumbnailFilename: '', ...dimensions };
+  }
+}
+
 function saveImageBuffer(buffer, extHint = 'png') {
   const ext = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(String(extHint || '').toLowerCase())
     ? String(extHint).toLowerCase()
@@ -551,6 +614,12 @@ function saveImageBuffer(buffer, extHint = 'png') {
   const filepath = path.join(UPLOAD_DIR, filename);
   fs.writeFileSync(filepath, buffer);
   return filename;
+}
+
+async function saveImageBufferWithThumbnail(buffer, extHint = 'png') {
+  const filename = saveImageBuffer(buffer, extHint);
+  const thumbnail = await createImageThumbnail(buffer, filename);
+  return { filename, ...thumbnail };
 }
 
 async function persistRemoteImage(remoteUrl) {
@@ -579,7 +648,7 @@ async function persistRemoteImage(remoteUrl) {
   const extByMime = getExtByMime(contentType);
   const extByUrl = inferExtFromUrl(remoteUrl);
   const ext = extByMime || extByUrl || 'png';
-  return saveImageBuffer(buffer, ext);
+  return saveImageBufferWithThumbnail(buffer, ext);
 }
 
 function getPublicBaseUrl(req) {
@@ -670,10 +739,11 @@ function normalizeUpstreamMessages(messages, req) {
         }
 
         if (part.image_url && typeof part.image_url === 'object') {
+          const { thumbnailUrl, thumbnail_url, previewUrl, preview_url, ...imageUrlPayload } = part.image_url;
           return {
             ...part,
             image_url: {
-              ...part.image_url,
+              ...imageUrlPayload,
               url: toAbsoluteImageUrl(part.image_url.url, req)
             }
           };
@@ -710,8 +780,20 @@ function saveDataUrlImage(dataUrl, maxBytes = 8 * 1024 * 1024) {
   return filename;
 }
 
+async function saveDataUrlImageWithThumbnail(dataUrl, maxBytes = 8 * 1024 * 1024) {
+  const filename = saveDataUrlImage(dataUrl, maxBytes);
+  const filepath = path.join(UPLOAD_DIR, filename);
+  const buffer = fs.readFileSync(filepath);
+  const thumbnail = await createImageThumbnail(buffer, filename);
+  return { filename, ...thumbnail };
+}
+
 function saveBase64Image(dataUrl) {
   return saveDataUrlImage(dataUrl, 8 * 1024 * 1024);
+}
+
+async function saveBase64ImageWithThumbnail(dataUrl) {
+  return saveDataUrlImageWithThumbnail(dataUrl, 8 * 1024 * 1024);
 }
 
 function buildSystemMessage() {
@@ -845,17 +927,26 @@ app.post('/api/test', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/upload-image', requireAdmin, (req, res) => {
+app.post('/api/upload-image', requireAdmin, async (req, res) => {
   try {
     const { dataUrl } = req.body || {};
     if (!dataUrl) {
       return res.status(400).json({ error: '缺少 dataUrl' });
     }
 
-    const filename = saveBase64Image(dataUrl);
-    const relativeUrl = `/uploads/${filename}`;
-    const absoluteUrl = `${getPublicBaseUrl(req)}${relativeUrl}`;
-    return res.json({ ok: true, url: absoluteUrl, relativeUrl });
+    const publicBaseUrl = getPublicBaseUrl(req);
+    const asset = buildStoredImageResponse(await saveBase64ImageWithThumbnail(dataUrl), publicBaseUrl);
+    const relativeUrl = `/uploads/${asset.filename}`;
+    const thumbnailRelativeUrl = asset.thumbnailFilename ? `/uploads/${asset.thumbnailFilename}` : '';
+    return res.json({
+      ok: true,
+      url: asset.url,
+      relativeUrl,
+      thumbnailUrl: asset.thumbnailUrl,
+      thumbnailRelativeUrl,
+      width: asset.width,
+      height: asset.height
+    });
   } catch (error) {
     writeLog('ERROR', '上传图片失败', { message: error.message });
     return res.status(400).json({
@@ -1067,6 +1158,9 @@ async function generateImageResult(input, publicBaseUrl, signal) {
         const firstB64 = String(first.b64_json || '').trim();
         const firstMime = String(first.mime_type || first.mime || '').trim().toLowerCase() || 'image/png';
         let imageUrl = firstUrl || toDataUrlFromBase64(firstB64, firstMime);
+        let imageThumbnailUrl = '';
+        let imageWidth = 0;
+        let imageHeight = 0;
 
         if (!imageUrl) {
           lastStatus = 502;
@@ -1105,8 +1199,11 @@ async function generateImageResult(input, publicBaseUrl, signal) {
 
         if (firstUrl && /^https?:\/\//i.test(firstUrl)) {
           try {
-            const savedFilename = await persistRemoteImage(firstUrl);
-            imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
+            const savedImage = buildStoredImageResponse(await persistRemoteImage(firstUrl), publicBaseUrl);
+            imageUrl = savedImage.url;
+            imageThumbnailUrl = savedImage.thumbnailUrl;
+            imageWidth = savedImage.width;
+            imageHeight = savedImage.height;
           } catch (persistError) {
             writeLog('INFO', '图片持久化失败，回退使用上游直链', {
               message: persistError.message
@@ -1115,8 +1212,11 @@ async function generateImageResult(input, publicBaseUrl, signal) {
         } else if (firstUrl && /^data:image\//i.test(firstUrl)) {
           try {
             const maxBytes = Number(process.env.IMAGE_MAX_BYTES || 32 * 1024 * 1024);
-            const savedFilename = saveDataUrlImage(firstUrl, maxBytes);
-            imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
+            const savedImage = buildStoredImageResponse(await saveDataUrlImageWithThumbnail(firstUrl, maxBytes), publicBaseUrl);
+            imageUrl = savedImage.url;
+            imageThumbnailUrl = savedImage.thumbnailUrl;
+            imageWidth = savedImage.width;
+            imageHeight = savedImage.height;
           } catch (persistError) {
             writeLog('INFO', 'data url 图片持久化失败，回退 data url', {
               message: persistError.message
@@ -1127,8 +1227,11 @@ async function generateImageResult(input, publicBaseUrl, signal) {
             const ext = getExtByMime(firstMime) || 'png';
             const buffer = Buffer.from(firstB64, 'base64');
             if (buffer.length) {
-              const savedFilename = saveImageBuffer(buffer, ext);
-              imageUrl = `${publicBaseUrl}/uploads/${savedFilename}`;
+              const savedImage = buildStoredImageResponse(await saveImageBufferWithThumbnail(buffer, ext), publicBaseUrl);
+              imageUrl = savedImage.url;
+              imageThumbnailUrl = savedImage.thumbnailUrl;
+              imageWidth = savedImage.width;
+              imageHeight = savedImage.height;
             }
           } catch (persistError) {
             writeLog('INFO', 'base64 图片持久化失败，回退 data url', {
@@ -1143,6 +1246,9 @@ async function generateImageResult(input, publicBaseUrl, signal) {
           upstreamModel,
           prompt: cleanPrompt,
           url: imageUrl,
+          thumbnailUrl: imageThumbnailUrl,
+          width: imageWidth,
+          height: imageHeight,
           revisedPrompt: first.revised_prompt || '',
           sizeUsed: trySize || '',
           fallbackApplied: index > 0
@@ -1250,10 +1356,10 @@ app.delete('/api/image-generate/:taskId', requireAdmin, (req, res) => {
 
 app.use('/uploads', express.static(UPLOAD_DIR, {
   fallthrough: false,
-  maxAge: '7d',
+  maxAge: '365d',
   setHeaders: (res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
   }
 }));
 app.use(express.static(WEB_ROOT, {
