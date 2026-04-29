@@ -5,3 +5,5 @@ server/presets.local.json
 .env
 .DS_Store
 .continue/
+server/easychat.log
+server/sessions.json
