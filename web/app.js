@@ -1,6 +1,8 @@
 let publicConfig = null;
 let adminConfig = null;
 let currentPresetId = null;
+let adminPresetSearchKeyword = '';
+let adminSelectedPresetId = null;
 const STORAGE_SESSIONS_KEY = 'easychat-sessions';
 const STORAGE_CURRENT_ID_KEY = 'easychat-current-id';
 let sessions = [];
@@ -986,34 +988,94 @@ function renderAdminPanel() {
   document.getElementById('app-name-input').value = adminConfig.appName || '';
   document.getElementById('background-image-input').value = adminConfig.backgroundImage || '';
 
-  const container = document.getElementById('admin-presets');
-  container.innerHTML = '';
+  if (!adminSelectedPresetId || !adminConfig.presets.some((preset) => preset.id === adminSelectedPresetId)) {
+    adminSelectedPresetId = adminConfig.defaultPresetId || adminConfig.presets[0]?.id || null;
+  }
 
-  adminConfig.presets.forEach((preset, index) => {
-    const card = document.createElement('div');
-    card.className = 'p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 space-y-3';
-    card.innerHTML = `
-      <div class="flex items-center justify-between gap-3">
+  const listContainer = document.getElementById('admin-presets-list');
+  const editorContainer = document.getElementById('admin-presets-editor');
+  const keyword = (adminPresetSearchKeyword || '').trim().toLowerCase();
+
+  const filteredPresets = adminConfig.presets.filter((preset) => {
+    if (!keyword) return true;
+    const target = `${preset.name || ''} ${preset.model || ''} ${preset.baseUrl || ''}`.toLowerCase();
+    return target.includes(keyword);
+  });
+
+  listContainer.innerHTML = '';
+  if (filteredPresets.length === 0) {
+    listContainer.innerHTML = '<div class="text-xs text-slate-400 p-3 rounded-xl border border-dashed border-slate-300 dark:border-slate-700">没有匹配的 Preset</div>';
+  } else {
+    filteredPresets.forEach((preset) => {
+      const isSelected = preset.id === adminSelectedPresetId;
+      const isDefault = preset.id === adminConfig.defaultPresetId;
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `w-full text-left p-3 rounded-xl border transition ${isSelected
+        ? 'border-blue-500 bg-blue-50/60 dark:bg-blue-500/10'
+        : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40'
+      }`;
+      row.innerHTML = `
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-xs font-semibold truncate">${escapeHtml(preset.name || 'Unnamed Preset')}</div>
+          ${isDefault ? '<span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300">Default</span>' : ''}
+        </div>
+        <div class="text-[11px] text-slate-400 truncate mt-1">${escapeHtml(preset.model || '-')}</div>
+      `;
+      row.onclick = () => {
+        adminSelectedPresetId = preset.id;
+        renderAdminPanel();
+      };
+      listContainer.appendChild(row);
+    });
+  }
+
+  const selectedPreset = adminConfig.presets.find((preset) => preset.id === adminSelectedPresetId);
+  if (!selectedPreset) {
+    editorContainer.innerHTML = '<div class="text-xs text-slate-400 p-4 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700">请选择一个 Preset 进行编辑</div>';
+    return;
+  }
+
+  editorContainer.innerHTML = `
+    <div class="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 space-y-3">
+      <div class="flex items-center justify-between gap-2">
         <label class="flex items-center gap-2 text-xs font-semibold text-slate-500">
-          <input type="radio" name="default-preset" ${adminConfig.defaultPresetId === preset.id ? 'checked' : ''} onchange="setDefaultPreset('${preset.id}')">
+          <input type="radio" name="default-preset" ${adminConfig.defaultPresetId === selectedPreset.id ? 'checked' : ''} onchange="setDefaultPreset('${selectedPreset.id}')">
           默认预设
         </label>
-        <button onclick="deleteAdminPreset('${preset.id}')" class="text-xs text-red-500 hover:underline">删除</button>
+        <div class="flex items-center gap-2">
+          <button onclick="duplicateAdminPreset('${selectedPreset.id}')" class="text-xs text-blue-500 hover:underline">复制</button>
+          <button onclick="deleteAdminPreset('${selectedPreset.id}')" class="text-xs text-red-500 hover:underline">删除</button>
+        </div>
       </div>
-      <input data-field="name" data-id="${preset.id}" value="${escapeHtml(preset.name)}" placeholder="Preset Name" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
-      <input data-field="baseUrl" data-id="${preset.id}" value="${escapeHtml(preset.baseUrl)}" placeholder="https://api.openai.com/v1" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
-      <input data-field="model" data-id="${preset.id}" value="${escapeHtml(preset.model)}" placeholder="gpt-4o" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
-      <input data-field="imageModel" data-id="${preset.id}" value="${escapeHtml(preset.imageModel || '')}" placeholder="gpt-image-1（可选）" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
-      <input data-field="apiKey" data-id="${preset.id}" value="${escapeHtml(preset.apiKey)}" placeholder="sk-..." class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
-      <div class="text-[10px] text-slate-400">Preset ${index + 1}</div>
-    `;
-    container.appendChild(card);
-  });
+      <input data-field="name" data-id="${selectedPreset.id}" value="${escapeHtml(selectedPreset.name)}" placeholder="Preset Name" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+      <input data-field="baseUrl" data-id="${selectedPreset.id}" value="${escapeHtml(selectedPreset.baseUrl)}" placeholder="https://api.openai.com/v1" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+      <input data-field="model" data-id="${selectedPreset.id}" value="${escapeHtml(selectedPreset.model)}" placeholder="gpt-4o" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+      <input data-field="imageModel" data-id="${selectedPreset.id}" value="${escapeHtml(selectedPreset.imageModel || '')}" placeholder="gpt-image-1（可选）" class="admin-input w-full p-3 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+      <div class="relative">
+        <input type="password" autocomplete="off" data-field="apiKey" data-id="${selectedPreset.id}" value="${escapeHtml(selectedPreset.apiKey)}" placeholder="sk-..." class="admin-input admin-api-key-input w-full p-3 pr-16 bg-white/70 dark:bg-slate-950/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 text-sm">
+        <button type="button" data-role="toggle-api-key" class="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300">显示</button>
+      </div>
+    </div>
+  `;
 
   document.querySelectorAll('.admin-input').forEach((input) => {
     input.addEventListener('input', (event) => {
       const { id, field } = event.target.dataset;
       updateAdminPreset(id, field, event.target.value);
+      if (field === 'name' || field === 'model' || field === 'baseUrl') renderAdminPanel();
+    });
+  });
+
+  document.querySelectorAll('[data-role="toggle-api-key"]').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      const button = event.currentTarget;
+      const wrap = button.closest('.relative');
+      const input = wrap?.querySelector('.admin-api-key-input');
+      if (!input) return;
+      const showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      button.textContent = showing ? '显示' : '隐藏';
     });
   });
 }
@@ -1036,6 +1098,8 @@ function updateAdminPreset(id, field, value) {
 function setDefaultPreset(id) {
   if (!adminConfig) return;
   adminConfig.defaultPresetId = id;
+  adminSelectedPresetId = id;
+  renderAdminPanel();
 }
 
 function addAdminPreset() {
@@ -1052,7 +1116,23 @@ function addAdminPreset() {
     imageModel: 'gpt-image-1',
     apiKey: ''
   });
+  adminSelectedPresetId = adminConfig.presets[adminConfig.presets.length - 1].id;
+  renderAdminPanel();
+}
 
+function duplicateAdminPreset(id) {
+  if (!adminConfig) return;
+  const source = adminConfig.presets.find((preset) => preset.id === id);
+  if (!source) return;
+
+  const copied = {
+    ...source,
+    id: randomId(),
+    name: `${source.name || 'Preset'} Copy`
+  };
+
+  adminConfig.presets.push(copied);
+  adminSelectedPresetId = copied.id;
   renderAdminPanel();
 }
 
@@ -1066,6 +1146,9 @@ function deleteAdminPreset(id) {
   adminConfig.presets = adminConfig.presets.filter((preset) => preset.id !== id);
   if (adminConfig.defaultPresetId === id) {
     adminConfig.defaultPresetId = adminConfig.presets[0]?.id || '';
+  }
+  if (adminSelectedPresetId === id) {
+    adminSelectedPresetId = adminConfig.defaultPresetId || adminConfig.presets[0]?.id || null;
   }
   renderAdminPanel();
 }
@@ -1111,6 +1194,7 @@ async function loadAdminConfig() {
     const data = await readJsonResponseOrThrow(res, '加载管理配置失败');
 
     adminConfig = data;
+    adminSelectedPresetId = adminConfig.defaultPresetId || adminConfig.presets[0]?.id || null;
     renderAdminPanel();
     setStatus('管理配置已加载', 'success');
   } catch (error) {
@@ -1543,6 +1627,11 @@ async function init() {
     }
   });
 
+  document.getElementById('admin-preset-search')?.addEventListener('input', (event) => {
+    adminPresetSearchKeyword = event.target.value || '';
+    renderAdminPanel();
+  });
+
   document.getElementById('user-input')?.addEventListener('paste', handleUserInputPaste);
   const sidebarOverlay = document.getElementById('sidebar-overlay');
   if (sidebarOverlay) {
@@ -1583,6 +1672,7 @@ window.testConnection = testConnection;
 window.loadAdminConfig = loadAdminConfig;
 window.saveAdminConfig = saveAdminConfig;
 window.addAdminPreset = addAdminPreset;
+window.duplicateAdminPreset = duplicateAdminPreset;
 window.deleteAdminPreset = deleteAdminPreset;
 window.setDefaultPreset = setDefaultPreset;
 window.clearImageUrl = clearImageUrl;

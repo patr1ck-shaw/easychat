@@ -95,11 +95,16 @@
           <input id="background-image-input" type="text" placeholder="Background Image URL" class="w-full p-3 bg-slate-50/50 dark:bg-slate-900/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm">
 
           <div class="flex items-center justify-between">
-            <label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Preset Editor</label>
+            <label class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Preset Manager</label>
             <button onclick="addAdminPreset()" class="text-blue-500 text-xs font-bold hover:underline">+ Add Preset</button>
           </div>
 
-          <div id="admin-presets" class="space-y-3"></div>
+          <input id="admin-preset-search" type="text" placeholder="搜索 Preset（名称 / 模型 / Base URL）" class="w-full p-3 bg-slate-50/50 dark:bg-slate-900/50 border dark:border-slate-700 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 transition-all text-sm">
+
+          <div class="grid grid-cols-1 lg:grid-cols-5 gap-3">
+            <div id="admin-presets-list" class="lg:col-span-2 space-y-2 max-h-80 overflow-y-auto pr-1"></div>
+            <div id="admin-presets-editor" class="lg:col-span-3"></div>
+          </div>
         </div>
       </section>
 
