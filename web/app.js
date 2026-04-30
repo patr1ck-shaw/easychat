@@ -1035,6 +1035,55 @@ function setAdminPanelVisible(visible) {
   document.getElementById('admin-panel').classList.toggle('hidden', !visible);
 }
 
+function getFilteredAdminPresets() {
+  if (!adminConfig) return [];
+
+  const keyword = (adminPresetSearchKeyword || '').trim().toLowerCase();
+  return adminConfig.presets.filter((preset) => {
+    if (!keyword) return true;
+    const target = `${preset.name || ''} ${preset.model || ''} ${preset.baseUrl || ''}`.toLowerCase();
+    return target.includes(keyword);
+  });
+}
+
+function renderAdminPresetList() {
+  if (!adminConfig) return;
+
+  const listContainer = document.getElementById('admin-presets-list');
+  if (!listContainer) return;
+
+  const filteredPresets = getFilteredAdminPresets();
+  listContainer.innerHTML = '';
+
+  if (filteredPresets.length === 0) {
+    listContainer.innerHTML = '<div class="text-xs text-slate-400 p-3 rounded-xl border border-dashed border-slate-300 dark:border-slate-700">没有匹配的 Preset</div>';
+    return;
+  }
+
+  filteredPresets.forEach((preset) => {
+    const isSelected = preset.id === adminSelectedPresetId;
+    const isDefault = preset.id === adminConfig.defaultPresetId;
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `w-full text-left p-3 rounded-xl border transition ${isSelected
+      ? 'border-blue-500 bg-blue-50/60 dark:bg-blue-500/10'
+      : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40'
+    }`;
+    row.innerHTML = `
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-xs font-semibold truncate">${escapeHtml(preset.name || 'Unnamed Preset')}</div>
+        ${isDefault ? '<span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300">Default</span>' : ''}
+      </div>
+      <div class="text-[11px] text-slate-400 truncate mt-1">${escapeHtml(preset.model || '-')}</div>
+    `;
+    row.onclick = () => {
+      adminSelectedPresetId = preset.id;
+      renderAdminPanel();
+    };
+    listContainer.appendChild(row);
+  });
+}
+
 function renderAdminPanel() {
   if (!adminConfig) {
     setAdminPanelVisible(false);
@@ -1051,41 +1100,8 @@ function renderAdminPanel() {
 
   const listContainer = document.getElementById('admin-presets-list');
   const editorContainer = document.getElementById('admin-presets-editor');
-  const keyword = (adminPresetSearchKeyword || '').trim().toLowerCase();
-
-  const filteredPresets = adminConfig.presets.filter((preset) => {
-    if (!keyword) return true;
-    const target = `${preset.name || ''} ${preset.model || ''} ${preset.baseUrl || ''}`.toLowerCase();
-    return target.includes(keyword);
-  });
-
-  listContainer.innerHTML = '';
-  if (filteredPresets.length === 0) {
-    listContainer.innerHTML = '<div class="text-xs text-slate-400 p-3 rounded-xl border border-dashed border-slate-300 dark:border-slate-700">没有匹配的 Preset</div>';
-  } else {
-    filteredPresets.forEach((preset) => {
-      const isSelected = preset.id === adminSelectedPresetId;
-      const isDefault = preset.id === adminConfig.defaultPresetId;
-      const row = document.createElement('button');
-      row.type = 'button';
-      row.className = `w-full text-left p-3 rounded-xl border transition ${isSelected
-        ? 'border-blue-500 bg-blue-50/60 dark:bg-blue-500/10'
-        : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/40'
-      }`;
-      row.innerHTML = `
-        <div class="flex items-center justify-between gap-2">
-          <div class="text-xs font-semibold truncate">${escapeHtml(preset.name || 'Unnamed Preset')}</div>
-          ${isDefault ? '<span class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300">Default</span>' : ''}
-        </div>
-        <div class="text-[11px] text-slate-400 truncate mt-1">${escapeHtml(preset.model || '-')}</div>
-      `;
-      row.onclick = () => {
-        adminSelectedPresetId = preset.id;
-        renderAdminPanel();
-      };
-      listContainer.appendChild(row);
-    });
-  }
+  if (!listContainer || !editorContainer) return;
+  renderAdminPresetList();
 
   const selectedPreset = adminConfig.presets.find((preset) => preset.id === adminSelectedPresetId);
   if (!selectedPreset) {
@@ -1120,7 +1136,8 @@ function renderAdminPanel() {
     input.addEventListener('input', (event) => {
       const { id, field } = event.target.dataset;
       updateAdminPreset(id, field, event.target.value);
-      if (field === 'name' || field === 'model' || field === 'baseUrl') renderAdminPanel();
+      // 只刷新左侧 Preset 列表，不重建当前编辑器，避免每键入/删除一个字符后输入框失焦。
+      if (field === 'name' || field === 'model' || field === 'baseUrl') renderAdminPresetList();
     });
   });
 
