@@ -895,7 +895,7 @@ app.post('/api/test', requireAdmin, async (req, res) => {
 
     const upstream = await fetchWithTimeout(url, {
       method: 'POST',
-      headers: buildUpstreamHeaders(preset.apiKey),
+      headers: buildUpstreamHeaders(preset.apiKey, {}, { includeCompatKeys: false }),
       body: JSON.stringify({
         model: preset.model,
         messages: [{ role: 'user', content: 'hi' }],
