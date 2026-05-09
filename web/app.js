@@ -195,7 +195,7 @@ async function pushSessionsToServer() {
         'Content-Type': 'application/json',
         'x-admin-password': password
       },
-      body: JSON.stringify({ sessions, currentSessionId })
+      body: JSON.stringify(buildSessionsSyncPayload())
     });
   } catch (error) {
     console.warn('同步会话到服务端失败', error);
@@ -387,6 +387,21 @@ function shrinkSessionsForStorage() {
   });
 
   return changed;
+}
+
+function buildSessionsSyncPayload() {
+  // 服务端同步也必须避免携带历史遗留的 data:image/base64 大图。
+  // 早期版本可能已经把截图/出图结果以内联 base64 存进 history；如果每次 PUT /api/sessions
+  // 都带上这些大字符串，会表现为“生成一张图后流量持续暴涨”。
+  return {
+    currentSessionId,
+    sessions: sessions.map((session) => ({
+      ...session,
+      history: Array.isArray(session.history)
+        ? session.history.map((msg) => trimMessageForStorage(msg))
+        : []
+    }))
+  };
 }
 
 function saveSessions() {
@@ -1625,7 +1640,10 @@ async function handleImageGenerate() {
     }
 
     const safeImageUrl = sanitizeImageUrl(data.url) || data.url;
-    const actualDimensions = await getImageDimensions(safeImageUrl);
+    const serverDimensions = Number(data.width || 0) > 0 && Number(data.height || 0) > 0
+      ? { width: Number(data.width), height: Number(data.height) }
+      : null;
+    const actualDimensions = serverDimensions || await getImageDimensions(safeImageUrl);
     const requestedSizeText = data.sizeUsed || IMAGE_GENERATE_PRIMARY_SIZE;
     const actualSizeText = actualDimensions ? `${actualDimensions.width}x${actualDimensions.height}` : '未知';
     const sizeMismatch = actualDimensions && requestedSizeText && requestedSizeText !== actualSizeText;
